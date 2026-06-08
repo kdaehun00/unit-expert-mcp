@@ -1,0 +1,29 @@
+[project]
+name = "unit-expert-mcp"
+version = "0.1.0"
+description = "A lightweight Model Context Protocol server for unit conversions."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.27,<2",
+]
+
+[project.scripts]
+unit-expert-mcp = "unit_expert_mcp.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
