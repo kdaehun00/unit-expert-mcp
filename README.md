@@ -48,6 +48,12 @@ Run the server directly:
 uv run unit-expert-mcp
 ```
 
+Run the server with Streamable HTTP:
+
+```bash
+uv run unit-expert-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
 Or run with the MCP CLI:
 
 ```bash
@@ -58,6 +64,21 @@ Test with MCP Inspector:
 
 ```bash
 uv run mcp dev src/unit_expert_mcp/server.py
+```
+
+## Docker
+
+Build and run the server:
+
+```bash
+docker build -t unit-expert-mcp .
+docker run --rm -p 8000:8000 unit-expert-mcp
+```
+
+The Streamable HTTP endpoint is:
+
+```text
+http://localhost:8000/mcp
 ```
 
 ## Client Config Example
