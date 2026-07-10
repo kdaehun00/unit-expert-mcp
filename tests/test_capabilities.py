@@ -24,7 +24,7 @@ def test_tools_capability_is_advertised_by_default() -> None:
 
 
 def test_streamable_http_uses_sessions_by_default() -> None:
-    assert mcp.settings.stateless_http is True
+    assert mcp.settings.stateless_http is False
 
 
 def test_tools_include_playmcp_required_metadata() -> None:

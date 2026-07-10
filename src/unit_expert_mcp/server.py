@@ -12,6 +12,7 @@ import anyio
 import mcp.shared.version as mcp_version
 import mcp.types as mcp_types
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -36,6 +37,12 @@ CORS_ALLOWED_ORIGINS = (
     "https://playmcp.kakao.com",
     "https://sandbox-playmcp.kakao.com",
     "https://developers.kakao.com",
+)
+CORS_ALLOWED_HOSTS = (
+    "unit-expert-mcp.onrender.com",
+    "127.0.0.1:*",
+    "localhost:*",
+    "[::1]:*",
 )
 SDK_SUPPORTED_PROTOCOL_VERSIONS = tuple(mcp_version.SUPPORTED_PROTOCOL_VERSIONS)
 _list_tools_handler: object | None = None
@@ -608,8 +615,13 @@ mcp = FastMCP(
     "Unit Expert MCP",
     host=os.getenv("MCP_HOST", "127.0.0.1"),
     port=_default_port(),
-    stateless_http=True,
+    stateless_http=False,
     json_response=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(CORS_ALLOWED_HOSTS),
+        allowed_origins=list(CORS_ALLOWED_ORIGINS),
+    ),
 )
 
 
@@ -828,10 +840,10 @@ def main() -> None:
     parser.add_argument(
         "--stateless-http",
         action="store_true",
-        default=_env_flag("MCP_STATELESS_HTTP", True),
+        default=_env_flag("MCP_STATELESS_HTTP"),
         help=(
             "Do not issue or require mcp-session-id headers for Streamable HTTP. "
-            "Defaults to MCP_STATELESS_HTTP or true."
+            "By default the HTTP transport is stateful and returns mcp-session-id."
         ),
     )
     args = parser.parse_args()
