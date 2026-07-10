@@ -1,287 +1,369 @@
-"""MCP tool registration for Unit Expert."""
+"""Minimal Streamable HTTP MCP server for PlayMCP."""
 
 from __future__ import annotations
 
-import argparse
+import json
 import os
-from collections.abc import Iterable
-from typing import Literal
+import uuid
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from math import isfinite
+from typing import Any
 
-import mcp.shared.version as mcp_version
-import mcp.types as mcp_types
-from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
-from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+SERVER_NAME = "unitExpert"
+SERVER_VERSION = "1.0.0"
+SERVICE_NAME = "Unit Expert(단위전문가)"
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
+LATEST_PROTOCOL_VERSION = "2025-11-25"
 
-from unit_expert_mcp.converter import (
-    convert_area as convert_area_value,
-    convert_length as convert_length_value,
-    convert_temperature as convert_temperature_value,
-    convert_volume as convert_volume_value,
-    convert_weight as convert_weight_value,
-    list_supported_units as list_supported_units_value,
-)
+SESSIONS: set[str] = set()
 
-Transport = Literal["stdio", "streamable-http"]
+LENGTH_FACTORS = {
+    "mm": 0.001,
+    "cm": 0.01,
+    "m": 1.0,
+    "km": 1000.0,
+    "in": 0.0254,
+    "ft": 0.3048,
+    "yd": 0.9144,
+    "mi": 1609.344,
+}
 
-SERVICE_NAME = "Unit Expert MCP(유닛 익스퍼트 MCP)"
-SERVER_NAME = "unit-expert-mcp"
-HEALTH_PATH = "/healthz"
-DEFAULT_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
-SDK_SUPPORTED_PROTOCOL_VERSIONS = tuple(mcp_version.SUPPORTED_PROTOCOL_VERSIONS)
+WEIGHT_FACTORS = {
+    "mg": 0.000001,
+    "g": 0.001,
+    "kg": 1.0,
+    "t": 1000.0,
+    "oz": 0.028349523125,
+    "lb": 0.45359237,
+}
 
-PLAYMCP_ORIGINS = (
-    "https://playmcp.kakao.com",
-    "https://sandbox-playmcp.kakao.com",
-    "https://developers.kakao.com",
-)
-ALLOWED_HOSTS = (
-    "unit-expert-mcp.onrender.com",
-    "127.0.0.1:*",
-    "localhost:*",
-    "[::1]:*",
-)
+ALIASES = {
+    "meter": "m",
+    "meters": "m",
+    "metre": "m",
+    "metres": "m",
+    "kilometer": "km",
+    "kilometers": "km",
+    "inch": "in",
+    "inches": "in",
+    "foot": "ft",
+    "feet": "ft",
+    "yard": "yd",
+    "yards": "yd",
+    "mile": "mi",
+    "miles": "mi",
+    "gram": "g",
+    "grams": "g",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "ounce": "oz",
+    "ounces": "oz",
+    "pound": "lb",
+    "pounds": "lb",
+}
 
 
-def _default_port() -> int:
-    raw_port = os.getenv("PORT") or os.getenv("MCP_PORT") or "8000"
-    return int(raw_port)
-
-
-def _parse_protocol_versions(raw_versions: str) -> tuple[str, ...]:
-    protocol_versions = tuple(
-        protocol_version.strip()
-        for protocol_version in raw_versions.split(",")
-        if protocol_version.strip()
-    )
-    if not protocol_versions:
-        raise ValueError("at least one protocol version must be configured")
-
-    return protocol_versions
-
-
-def _supported_protocol_versions_for(protocol_versions: Iterable[str]) -> list[str]:
-    requested_versions = tuple(protocol_versions)
-    unknown_versions = [
-        protocol_version
-        for protocol_version in requested_versions
-        if protocol_version not in SDK_SUPPORTED_PROTOCOL_VERSIONS
+def tools() -> list[dict[str, Any]]:
+    value_unit_schema = {
+        "type": "object",
+        "properties": {
+            "value": {"type": "number", "description": "Numeric value to convert."},
+            "from_unit": {"type": "string", "description": "Source unit."},
+            "to_unit": {"type": "string", "description": "Target unit."},
+        },
+        "required": ["value", "from_unit", "to_unit"],
+        "additionalProperties": False,
+    }
+    return [
+        {
+            "name": "convert_length",
+            "description": (
+                f"{SERVICE_NAME} converts length values between mm, cm, m, km, in, ft, yd, "
+                "and mi."
+            ),
+            "inputSchema": value_unit_schema,
+            "annotations": annotations("Convert Length"),
+        },
+        {
+            "name": "convert_weight",
+            "description": f"{SERVICE_NAME} converts weight values between mg, g, kg, t, oz, and lb.",
+            "inputSchema": value_unit_schema,
+            "annotations": annotations("Convert Weight"),
+        },
+        {
+            "name": "list_supported_units",
+            "description": f"{SERVICE_NAME} lists supported canonical units by conversion category.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "annotations": annotations("List Supported Units"),
+        },
     ]
-    if unknown_versions:
-        supported_versions = ", ".join(SDK_SUPPORTED_PROTOCOL_VERSIONS)
-        unknown = ", ".join(unknown_versions)
+
+
+def annotations(title: str) -> dict[str, bool | str]:
+    return {
+        "title": title,
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+        "idempotentHint": True,
+    }
+
+
+def handle_json_rpc(payload: Any) -> tuple[int, dict[str, str], dict[str, Any] | None]:
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+        return 400, {}, json_rpc_error(None, -32600, "Invalid Request")
+
+    request_id = payload.get("id")
+    method = payload.get("method")
+    is_notification = "id" not in payload
+
+    if method == "initialize":
+        session_id = str(uuid.uuid4())
+        SESSIONS.add(session_id)
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        requested_version = params.get("protocolVersion")
+        protocol_version = (
+            requested_version
+            if requested_version in SUPPORTED_PROTOCOL_VERSIONS
+            else LATEST_PROTOCOL_VERSION
+        )
+        result = {
+            "protocolVersion": protocol_version,
+            "capabilities": {"tools": {"listChanged": True}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        }
+        return 200, {"Mcp-Session-Id": session_id}, json_rpc_result(request_id, result)
+
+    if method == "notifications/initialized":
+        return 202, {}, None
+
+    if method == "ping":
+        return 202 if is_notification else 200, {}, None if is_notification else json_rpc_result(request_id, {})
+
+    if method == "tools/list":
+        return 200, {}, json_rpc_result(request_id, {"tools": tools()})
+
+    if method == "tools/call":
+        result = call_tool(payload.get("params"))
+        return 200, {}, json_rpc_result(request_id, result)
+
+    if is_notification:
+        return 202, {}, None
+    return 200, {}, json_rpc_error(request_id, -32601, f"Method not found: {method}")
+
+
+def call_tool(params: Any) -> dict[str, Any]:
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return tool_error("tools/call requires a tool name.")
+
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+
+    try:
+        if params["name"] == "convert_length":
+            return tool_success(convert_with_factor(arguments, "length", LENGTH_FACTORS))
+        if params["name"] == "convert_weight":
+            return tool_success(convert_with_factor(arguments, "weight", WEIGHT_FACTORS))
+        if params["name"] == "list_supported_units":
+            text = "length: mm, cm, m, km, in, ft, yd, mi\nweight: mg, g, kg, t, oz, lb"
+            return {
+                "content": [{"type": "text", "text": text}],
+                "isError": False,
+            }
+        return tool_error(f"Unknown tool: {params['name']}")
+    except ValueError as error:
+        return tool_error(str(error))
+
+
+def convert_with_factor(
+    arguments: dict[str, Any],
+    category: str,
+    factors: dict[str, float],
+) -> dict[str, Any]:
+    value = validate_value(arguments.get("value"))
+    from_unit = normalize_unit(arguments.get("from_unit"))
+    to_unit = normalize_unit(arguments.get("to_unit"))
+    ensure_supported(from_unit, factors, category)
+    ensure_supported(to_unit, factors, category)
+
+    output_value = value * factors[from_unit] / factors[to_unit]
+    return {
+        "input_value": value,
+        "input_unit": from_unit,
+        "output_value": output_value,
+        "output_unit": to_unit,
+        "category": category,
+    }
+
+
+def validate_value(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("value must be a finite number.") from error
+    if not isfinite(number):
+        raise ValueError("value must be a finite number.")
+    return number
+
+
+def normalize_unit(unit: Any) -> str:
+    if not isinstance(unit, str) or not unit.strip():
+        raise ValueError("unit must be a non-empty string.")
+    normalized = unit.strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+    return ALIASES.get(normalized, normalized)
+
+
+def ensure_supported(unit: str, factors: dict[str, float], category: str) -> None:
+    if unit not in factors:
         raise ValueError(
-            f"unsupported protocol version: {unknown}. Known versions: {supported_versions}"
+            f"unsupported {category} unit '{unit}'. Supported units: {', '.join(factors)}."
         )
 
-    ordered_versions = [
-        protocol_version
-        for protocol_version in SDK_SUPPORTED_PROTOCOL_VERSIONS
-        if protocol_version in requested_versions
-    ]
-    if not ordered_versions:
-        raise ValueError("at least one protocol version must be configured")
 
-    return ordered_versions
-
-
-def configure_supported_protocol_versions(protocol_versions: Iterable[str]) -> tuple[str, ...]:
-    """Limit MCP version negotiation to configured supported protocol versions."""
-    supported_versions = _supported_protocol_versions_for(protocol_versions)
-
-    mcp_version.SUPPORTED_PROTOCOL_VERSIONS[:] = supported_versions
-    mcp_types.LATEST_PROTOCOL_VERSION = supported_versions[-1]
-
-    return tuple(supported_versions)
-
-
-def _tool_annotations(title: str) -> mcp_types.ToolAnnotations:
-    return mcp_types.ToolAnnotations(
-        title=title,
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
+def tool_success(result: dict[str, Any]) -> dict[str, Any]:
+    text = (
+        f"{format_number(result['input_value'])} {result['input_unit']} = "
+        f"{format_number(result['output_value'])} {result['output_unit']}"
     )
+    return {"content": [{"type": "text", "text": text}], "isError": False}
 
 
-class HealthCheckMiddleware:
-    """Return a lightweight health response for deployment probes."""
+def tool_error(message: str) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": message}], "isError": True}
 
-    def __init__(self, app: ASGIApp, *, path: str = HEALTH_PATH) -> None:
-        self.app = app
-        self.path = path
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if self._is_health_request(scope):
-            response = JSONResponse({"ok": True, "service": SERVER_NAME})
-            await response(scope, receive, send)
+def format_number(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return str(float(f"{value:.12g}"))
+
+
+def json_rpc_result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def json_rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "UnitExpertMCP/1.0"
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_cors_headers()
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        if self.path == "/healthz":
+            self.send_json(200, {"ok": True, "service": SERVER_NAME})
             return
 
-        await self.app(scope, receive, send)
+        if self.path != "/mcp":
+            self.send_text(404, "Not found")
+            return
 
-    def _is_health_request(self, scope: Scope) -> bool:
-        return (
-            scope["type"] == "http"
-            and scope.get("path") == self.path
-            and scope.get("method") == "GET"
+        accept = self.headers.get("Accept", "")
+        if "text/event-stream" not in accept:
+            self.send_text(400, "Invalid Accept header. Expected TEXT_EVENT_STREAM")
+            return
+
+        session_id = self.headers.get("mcp-session-id")
+        if not session_id:
+            self.send_text(400, "Session ID required in mcp-session-id header")
+            return
+
+        self.send_response(HTTPStatus.OK)
+        self.send_cors_headers()
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b": connected\n\n")
+
+    def do_POST(self) -> None:
+        if self.path != "/mcp":
+            self.send_text(404, "Not found")
+            return
+
+        accept = self.headers.get("Accept", "")
+        if "application/json" not in accept or "text/event-stream" not in accept:
+            self.send_text(400, "Invalid Accept headers. Expected TEXT_EVENT_STREAM and APPLICATION_JSON")
+            return
+
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length)
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            self.send_json(400, json_rpc_error(None, -32700, "Parse error"))
+            return
+
+        status, extra_headers, response = handle_json_rpc(payload)
+        if response is None:
+            self.send_response(status)
+            self.send_cors_headers()
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        self.send_json(status, response, extra_headers)
+
+    def send_json(
+        self,
+        status: int,
+        payload: dict[str, Any],
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_cors_headers()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_text(self, status: int, text: str) -> None:
+        body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_cors_headers()
+        self.send_header("Content-Type", "text/plain;charset=UTF-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_cors_headers(self) -> None:
+        origin = self.headers.get("Origin") or "*"
+        requested_headers = self.headers.get("Access-Control-Request-Headers")
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            requested_headers
+            or "authorization,content-type,accept,mcp-protocol-version,mcp-session-id,*",
         )
+        self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id,mcp-session-id,*")
+        self.send_header("Vary", "Origin")
 
-
-mcp = FastMCP(
-    SERVER_NAME,
-    host=os.getenv("MCP_HOST", "127.0.0.1"),
-    port=_default_port(),
-    stateless_http=False,
-    json_response=True,
-    transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=list(ALLOWED_HOSTS),
-        allowed_origins=list(PLAYMCP_ORIGINS),
-    ),
-)
-
-
-@mcp.tool(
-    title="Convert Length",
-    description=(
-        f"{SERVICE_NAME} converts length values between mm, cm, m, km, in, ft, yd, and mi."
-    ),
-    annotations=_tool_annotations("Convert Length"),
-)
-def convert_length(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
-    """Convert length between mm, cm, m, km, in, ft, yd, and mi."""
-    return convert_length_value(value, from_unit, to_unit)
-
-
-@mcp.tool(
-    title="Convert Weight",
-    description=f"{SERVICE_NAME} converts weight values between mg, g, kg, t, oz, and lb.",
-    annotations=_tool_annotations("Convert Weight"),
-)
-def convert_weight(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
-    """Convert weight between mg, g, kg, t, oz, and lb."""
-    return convert_weight_value(value, from_unit, to_unit)
-
-
-@mcp.tool(
-    title="Convert Temperature",
-    description=f"{SERVICE_NAME} converts temperature values between c, f, and k.",
-    annotations=_tool_annotations("Convert Temperature"),
-)
-def convert_temperature(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
-    """Convert temperature between c, f, and k."""
-    return convert_temperature_value(value, from_unit, to_unit)
-
-
-@mcp.tool(
-    title="Convert Area",
-    description=(
-        f"{SERVICE_NAME} converts area values between mm2, cm2, m2, km2, in2, ft2, yd2, "
-        "and acre."
-    ),
-    annotations=_tool_annotations("Convert Area"),
-)
-def convert_area(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
-    """Convert area between mm2, cm2, m2, km2, in2, ft2, yd2, and acre."""
-    return convert_area_value(value, from_unit, to_unit)
-
-
-@mcp.tool(
-    title="Convert Volume",
-    description=(
-        f"{SERVICE_NAME} converts volume values between ml, l, m3, in3, ft3, cup, pt, qt, "
-        "gal, and floz."
-    ),
-    annotations=_tool_annotations("Convert Volume"),
-)
-def convert_volume(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
-    """Convert volume between ml, l, m3, in3, ft3, cup, pt, qt, gal, and floz."""
-    return convert_volume_value(value, from_unit, to_unit)
-
-
-@mcp.tool(
-    title="List Supported Units",
-    description=f"{SERVICE_NAME} lists supported canonical units by conversion category.",
-    annotations=_tool_annotations("List Supported Units"),
-)
-def list_supported_units() -> dict[str, tuple[str, ...]]:
-    """List supported canonical units by conversion category."""
-    return list_supported_units_value()
-
-
-def streamable_http_app() -> ASGIApp:
-    """Build the public Streamable HTTP app."""
-    app: ASGIApp = mcp.streamable_http_app()
-    app = HealthCheckMiddleware(app)
-    return CORSMiddleware(
-        app,
-        allow_origins=list(PLAYMCP_ORIGINS),
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-        expose_headers=["mcp-session-id"],
-    )
-
-
-def _run_streamable_http_app(app: ASGIApp) -> None:
-    import uvicorn
-
-    uvicorn.run(
-        app,
-        host=mcp.settings.host,
-        port=mcp.settings.port,
-        log_level=mcp.settings.log_level.lower(),
-    )
+    def log_message(self, format: str, *args: Any) -> None:
+        print(f"{self.address_string()} - {format % args}")
 
 
 def main() -> None:
-    """Run the MCP server."""
-    parser = argparse.ArgumentParser(description="Run the Unit Expert MCP server.")
-    parser.add_argument(
-        "--transport",
-        choices=("stdio", "streamable-http"),
-        default=os.getenv("MCP_TRANSPORT", "stdio"),
-        help="MCP transport to use. Defaults to MCP_TRANSPORT or stdio.",
-    )
-    parser.add_argument(
-        "--host",
-        default=os.getenv("MCP_HOST"),
-        help="Host for HTTP transports. Defaults to MCP_HOST or 127.0.0.1.",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port for HTTP transport. Defaults to PORT, MCP_PORT, or 8000.",
-    )
-    parser.add_argument(
-        "--protocol-versions",
-        default=os.getenv("MCP_PROTOCOL_VERSIONS", ",".join(DEFAULT_PROTOCOL_VERSIONS)),
-        help=(
-            "Comma-separated MCP protocol versions this server supports during initialize. "
-            f"Defaults to {','.join(DEFAULT_PROTOCOL_VERSIONS)}."
-        ),
-    )
-    args = parser.parse_args()
-
-    try:
-        protocol_versions = _parse_protocol_versions(args.protocol_versions)
-        configure_supported_protocol_versions(protocol_versions)
-    except ValueError as error:
-        parser.error(str(error))
-
-    if args.host:
-        mcp.settings.host = args.host
-    if args.port is not None:
-        mcp.settings.port = args.port
-
-    if args.transport == "streamable-http":
-        _run_streamable_http_app(streamable_http_app())
-        return
-
-    mcp.run(transport=args.transport)
+    port = int(os.getenv("PORT", "8000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"{SERVER_NAME} listening on 0.0.0.0:{port}")
+    server.serve_forever()
 
 
 if __name__ == "__main__":
