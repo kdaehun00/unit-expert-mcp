@@ -26,6 +26,31 @@ SESSIONS: set[str] = set()
 SCENARIO_LOCK = Lock()
 ACTIVE_SCENARIO = "ok"
 
+SCENARIO_TITLES = {
+    "ok": "정상 응답",
+    "valid-tools": "정상 툴 1개 반환",
+    "auth-401": "인증 실패 401",
+    "auth-403": "권한 없음 403",
+    "no-tools-capability": "툴 기능 없음",
+    "tools-list-error": "툴 목록 에러",
+    "tools-list-null": "툴 목록 null 반환",
+    "tools-list-empty": "빈 툴 목록 반환",
+    "duplicate-tool-name": "중복 툴 이름 반환",
+    "too-many-tools": "너무 많은 툴 반환",
+    "invalid-tool-name-char": "잘못된 툴 이름 문자",
+    "invalid-tool-name-length": "너무 긴 툴 이름",
+    "missing-name": "툴 이름 누락",
+    "missing-description": "툴 설명 누락",
+    "missing-input-schema": "입력 스키마 누락",
+    "missing-annotations": "어노테이션 누락",
+    "forbidden-kakao-name": "금지어 kakao 포함",
+    "mcp-identifier-name": "카카오맵 이름 사용",
+    "long-description": "너무 긴 설명 반환",
+    "missing-service-name-in-description": "서비스명 없는 설명",
+    "incomplete-annotations": "불완전한 어노테이션",
+    "delayed-response": "느린 응답",
+}
+
 SCENARIO_DESCRIPTIONS = {
     "ok": "정상 Unit Expert 도구 목록을 반환합니다.",
     "valid-tools": "검증용 정상 도구 1개만 반환합니다.",
@@ -570,10 +595,18 @@ def json_rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
 
 def render_scenario_page(message: str | None = None, error: str | None = None) -> str:
     active_scenario = get_active_scenario()
+    active_title = SCENARIO_TITLES[active_scenario]
     rows = "\n".join(
         f"""
-        <tr data-scenario="{escape(scenario)}" class="{'active' if scenario == active_scenario else ''}">
-          <td><code>{escape(scenario)}</code></td>
+        <tr
+          data-scenario="{escape(scenario)}"
+          data-title="{escape(SCENARIO_TITLES[scenario])}"
+          class="{'active' if scenario == active_scenario else ''}"
+        >
+          <td>
+            <strong>{escape(SCENARIO_TITLES[scenario])}</strong>
+            <code>{escape(scenario)}</code>
+          </td>
           <td>{escape(description)}</td>
         </tr>
         """
@@ -581,7 +614,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     )
     options = "\n".join(
         f'<option value="{escape(scenario)}" {"selected" if scenario == active_scenario else ""}>'
-        f"{escape(scenario)}</option>"
+        f"{escape(SCENARIO_TITLES[scenario])}</option>"
         for scenario in SCENARIO_DESCRIPTIONS
     )
     notice = ""
@@ -661,12 +694,18 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
     .status span:nth-child(odd) {{ color: var(--muted); }}
     code {{
+      display: inline-block;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 13px;
       background: #f1f3f6;
       border: 1px solid #e4e7ec;
       border-radius: 4px;
       padding: 2px 5px;
+    }}
+    td strong {{
+      display: block;
+      margin-bottom: 5px;
+      font-size: 14px;
     }}
     form {{
       display: grid;
@@ -789,9 +828,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       {notice}
       <div class="status">
         <span>Active scenario</span>
-        <span><code id="activeScenario">{escape(active_scenario)}</code></span>
-        <span>Header override</span>
-        <span><code>{escape(TEST_SCENARIO_HEADER)}</code></span>
+        <span>
+          <strong id="activeTitle">{escape(active_title)}</strong>
+          <code id="activeScenario">{escape(active_scenario)}</code>
+        </span>
       </div>
       <form id="scenarioForm" method="post" action="/scenario">
         <select id="scenarioSelect" name="scenario" aria-label="Scenario">{options}</select>
@@ -802,7 +842,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       <table>
         <thead>
           <tr>
-            <th>Scenario</th>
+            <th>시나리오</th>
             <th>효과</th>
           </tr>
         </thead>
@@ -813,7 +853,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       <aside class="terminal" aria-label="MCP response preview">
         <div class="terminal-header">
           <span>/mcp response</span>
-          <span id="terminalScenario">{escape(active_scenario)}</span>
+          <span id="terminalScenario">{escape(active_title)}</span>
         </div>
         <pre id="responsePreview">Loading...</pre>
       </aside>
@@ -823,6 +863,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const form = document.getElementById("scenarioForm");
     const select = document.getElementById("scenarioSelect");
     const activeScenario = document.getElementById("activeScenario");
+    const activeTitle = document.getElementById("activeTitle");
     const terminalScenario = document.getElementById("terminalScenario");
     const preview = document.getElementById("responsePreview");
     const rows = Array.from(document.querySelectorAll("[data-scenario]"));
@@ -835,9 +876,23 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }}
     }}
 
+    function formatHttp(label, response) {{
+      const body = typeof response.body === "string" ? response.body : pretty(response.body);
+      return [
+        `$ ${{label}}`,
+        `HTTP ${{response.status}}`,
+        `content-type: ${{response.contentType || "-"}}`,
+        "",
+        body
+      ].join("\\n");
+    }}
+
     function markActive(scenario) {{
+      const row = rows.find((candidate) => candidate.dataset.scenario === scenario);
+      const title = row ? row.dataset.title : scenario;
       activeScenario.textContent = scenario;
-      terminalScenario.textContent = scenario;
+      activeTitle.textContent = title;
+      terminalScenario.textContent = title;
       rows.forEach((row) => {{
         row.classList.toggle("active", row.dataset.scenario === scenario);
       }});
@@ -867,7 +922,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     async function refreshPreview() {{
       const scenario = activeScenario.textContent;
-      preview.textContent = `$ scenario: ${{scenario}}\\n$ POST /mcp initialize\\n...`;
+      const title = activeTitle.textContent;
+      preview.textContent = `$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /mcp initialize\\n...`;
       try {{
         const initialize = await postMcp({{
           jsonrpc: "2.0",
@@ -886,22 +942,21 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           params: {{}}
         }});
         preview.textContent = [
-          `$ scenario: ${{scenario}}`,
-          "$ POST /mcp initialize",
-          pretty(initialize),
+          `$ 시나리오: ${{title}} (${{scenario}})`,
+          formatHttp("POST /mcp initialize", initialize),
           "",
-          "$ POST /mcp tools/list",
-          pretty(toolsList)
+          formatHttp("POST /mcp tools/list", toolsList)
         ].join("\\n");
       }} catch (error) {{
-        preview.textContent = `$ scenario: ${{scenario}}\\n${{error && error.stack ? error.stack : error}}`;
+        preview.textContent = `$ 시나리오: ${{title}} (${{scenario}})\\n${{error && error.stack ? error.stack : error}}`;
       }}
     }}
 
     form.addEventListener("submit", async (event) => {{
       event.preventDefault();
       const scenario = select.value;
-      preview.textContent = `$ scenario: ${{scenario}}\\n$ POST /scenario\\n...`;
+      const title = select.options[select.selectedIndex].text;
+      preview.textContent = `$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /scenario\\n...`;
       const response = await fetch("/scenario", {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
@@ -975,6 +1030,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, "Not found")
             return
 
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length)
+
         scenario = self.request_scenario()
         if self.handle_pre_json_rpc_scenario(scenario):
             return
@@ -984,8 +1042,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(400, "Invalid Accept headers. Expected TEXT_EVENT_STREAM and APPLICATION_JSON")
             return
 
-        content_length = int(self.headers.get("Content-Length", "0"))
-        raw_body = self.rfile.read(content_length)
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
