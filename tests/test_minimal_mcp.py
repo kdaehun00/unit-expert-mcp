@@ -31,7 +31,7 @@ class MinimalMcpTest(unittest.TestCase):
     def test_tools_match_playmcp_required_metadata(self) -> None:
         listed_tools = tools()
 
-        self.assertEqual(len(listed_tools), 3)
+        self.assertEqual(len(listed_tools), 6)
         for tool in listed_tools:
             self.assertGreaterEqual(len(tool["name"]), 1)
             self.assertLessEqual(len(tool["name"]), 128)
@@ -73,6 +73,30 @@ class MinimalMcpTest(unittest.TestCase):
             payload["result"],
             {
                 "content": [{"type": "text", "text": "1 m = 100 cm"}],
+                "isError": False,
+            },
+        )
+
+    def test_convert_temperature_tool_returns_minimal_text_result(self) -> None:
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "convert_temperature",
+                    "arguments": {"value": 32, "from_unit": "f", "to_unit": "c"},
+                },
+            }
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(
+            payload["result"],
+            {
+                "content": [{"type": "text", "text": "32 f = 0 c"}],
                 "isError": False,
             },
         )

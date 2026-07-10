@@ -30,6 +30,9 @@ Content-Type: application/json
 
 - `convert_length`
 - `convert_weight`
+- `convert_temperature`
+- `convert_area`
+- `convert_volume`
 - `list_supported_units`
 
 ## Header Scenarios

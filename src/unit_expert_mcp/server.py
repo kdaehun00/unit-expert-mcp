@@ -41,13 +41,45 @@ WEIGHT_FACTORS = {
     "lb": 0.45359237,
 }
 
+AREA_FACTORS = {
+    "mm2": 0.000001,
+    "cm2": 0.0001,
+    "m2": 1.0,
+    "km2": 1_000_000.0,
+    "in2": 0.00064516,
+    "ft2": 0.09290304,
+    "yd2": 0.83612736,
+    "acre": 4046.8564224,
+}
+
+VOLUME_FACTORS = {
+    "ml": 0.001,
+    "l": 1.0,
+    "m3": 1000.0,
+    "in3": 0.016387064,
+    "ft3": 28.316846592,
+    "cup": 0.2365882365,
+    "pt": 0.473176473,
+    "qt": 0.946352946,
+    "gal": 3.785411784,
+    "floz": 0.0295735295625,
+}
+
+TEMPERATURE_UNITS = ("c", "f", "k")
+
 ALIASES = {
+    "millimeter": "mm",
+    "millimeters": "mm",
+    "centimeter": "cm",
+    "centimeters": "cm",
     "meter": "m",
     "meters": "m",
     "metre": "m",
     "metres": "m",
     "kilometer": "km",
     "kilometers": "km",
+    "kilometre": "km",
+    "kilometres": "km",
     "inch": "in",
     "inches": "in",
     "foot": "ft",
@@ -56,14 +88,81 @@ ALIASES = {
     "yards": "yd",
     "mile": "mi",
     "miles": "mi",
+    "milligram": "mg",
+    "milligrams": "mg",
     "gram": "g",
     "grams": "g",
     "kilogram": "kg",
     "kilograms": "kg",
+    "ton": "t",
+    "tons": "t",
+    "tonne": "t",
+    "tonnes": "t",
     "ounce": "oz",
     "ounces": "oz",
     "pound": "lb",
     "pounds": "lb",
+    "celsius": "c",
+    "centigrade": "c",
+    "fahrenheit": "f",
+    "kelvin": "k",
+    "sqmm": "mm2",
+    "squaremillimeter": "mm2",
+    "squaremillimeters": "mm2",
+    "sqcm": "cm2",
+    "squarecentimeter": "cm2",
+    "squarecentimeters": "cm2",
+    "sqm": "m2",
+    "squaremeter": "m2",
+    "squaremeters": "m2",
+    "squaremetre": "m2",
+    "squaremetres": "m2",
+    "sqkm": "km2",
+    "squarekilometer": "km2",
+    "squarekilometers": "km2",
+    "sqin": "in2",
+    "squareinch": "in2",
+    "squareinches": "in2",
+    "sqft": "ft2",
+    "squarefoot": "ft2",
+    "squarefeet": "ft2",
+    "sqyd": "yd2",
+    "squareyard": "yd2",
+    "squareyards": "yd2",
+    "acres": "acre",
+    "milliliter": "ml",
+    "milliliters": "ml",
+    "millilitre": "ml",
+    "millilitres": "ml",
+    "liter": "l",
+    "liters": "l",
+    "litre": "l",
+    "litres": "l",
+    "cubicmeter": "m3",
+    "cubicmeters": "m3",
+    "cubicmetre": "m3",
+    "cubicmetres": "m3",
+    "cubicinch": "in3",
+    "cubicinches": "in3",
+    "cubicfoot": "ft3",
+    "cubicfeet": "ft3",
+    "cups": "cup",
+    "pint": "pt",
+    "pints": "pt",
+    "quart": "qt",
+    "quarts": "qt",
+    "gallon": "gal",
+    "gallons": "gal",
+    "fluidounce": "floz",
+    "fluidounces": "floz",
+}
+
+SUPPORTED_UNITS = {
+    "length": tuple(LENGTH_FACTORS),
+    "weight": tuple(WEIGHT_FACTORS),
+    "temperature": TEMPERATURE_UNITS,
+    "area": tuple(AREA_FACTORS),
+    "volume": tuple(VOLUME_FACTORS),
 }
 
 
@@ -93,6 +192,30 @@ def tools() -> list[dict[str, Any]]:
             "description": f"{SERVICE_NAME} converts weight values between mg, g, kg, t, oz, and lb.",
             "inputSchema": value_unit_schema,
             "annotations": annotations("Convert Weight"),
+        },
+        {
+            "name": "convert_temperature",
+            "description": f"{SERVICE_NAME} converts temperature values between c, f, and k.",
+            "inputSchema": value_unit_schema,
+            "annotations": annotations("Convert Temperature"),
+        },
+        {
+            "name": "convert_area",
+            "description": (
+                f"{SERVICE_NAME} converts area values between mm2, cm2, m2, km2, in2, ft2, "
+                "yd2, and acre."
+            ),
+            "inputSchema": value_unit_schema,
+            "annotations": annotations("Convert Area"),
+        },
+        {
+            "name": "convert_volume",
+            "description": (
+                f"{SERVICE_NAME} converts volume values between ml, l, m3, in3, ft3, cup, "
+                "pt, qt, gal, and floz."
+            ),
+            "inputSchema": value_unit_schema,
+            "annotations": annotations("Convert Volume"),
         },
         {
             "name": "list_supported_units",
@@ -257,8 +380,17 @@ def call_tool(params: Any) -> dict[str, Any]:
             return tool_success(convert_with_factor(arguments, "length", LENGTH_FACTORS))
         if params["name"] == "convert_weight":
             return tool_success(convert_with_factor(arguments, "weight", WEIGHT_FACTORS))
+        if params["name"] == "convert_temperature":
+            return tool_success(convert_temperature(arguments))
+        if params["name"] == "convert_area":
+            return tool_success(convert_with_factor(arguments, "area", AREA_FACTORS))
+        if params["name"] == "convert_volume":
+            return tool_success(convert_with_factor(arguments, "volume", VOLUME_FACTORS))
         if params["name"] == "list_supported_units":
-            text = "length: mm, cm, m, km, in, ft, yd, mi\nweight: mg, g, kg, t, oz, lb"
+            text = "\n".join(
+                f"{category}: {', '.join(units)}"
+                for category, units in SUPPORTED_UNITS.items()
+            )
             return {
                 "content": [{"type": "text", "text": text}],
                 "isError": False,
@@ -289,6 +421,24 @@ def convert_with_factor(
     }
 
 
+def convert_temperature(arguments: dict[str, Any]) -> dict[str, Any]:
+    value = validate_value(arguments.get("value"))
+    from_unit = normalize_unit(arguments.get("from_unit"))
+    to_unit = normalize_unit(arguments.get("to_unit"))
+    ensure_supported_temperature(from_unit)
+    ensure_supported_temperature(to_unit)
+
+    celsius = temperature_to_celsius(value, from_unit)
+    output_value = celsius_to_temperature(celsius, to_unit)
+    return {
+        "input_value": value,
+        "input_unit": from_unit,
+        "output_value": output_value,
+        "output_unit": to_unit,
+        "category": "temperature",
+    }
+
+
 def validate_value(value: Any) -> float:
     try:
         number = float(value)
@@ -311,6 +461,33 @@ def ensure_supported(unit: str, factors: dict[str, float], category: str) -> Non
         raise ValueError(
             f"unsupported {category} unit '{unit}'. Supported units: {', '.join(factors)}."
         )
+
+
+def ensure_supported_temperature(unit: str) -> None:
+    if unit not in TEMPERATURE_UNITS:
+        raise ValueError(
+            f"unsupported temperature unit '{unit}'. Supported units: {', '.join(TEMPERATURE_UNITS)}."
+        )
+
+
+def temperature_to_celsius(value: float, unit: str) -> float:
+    if unit == "c":
+        return value
+    if unit == "f":
+        return (value - 32.0) * 5.0 / 9.0
+    if unit == "k":
+        return value - 273.15
+    raise ValueError(f"unsupported temperature unit '{unit}'.")
+
+
+def celsius_to_temperature(value: float, unit: str) -> float:
+    if unit == "c":
+        return value
+    if unit == "f":
+        return (value * 9.0 / 5.0) + 32.0
+    if unit == "k":
+        return value + 273.15
+    raise ValueError(f"unsupported temperature unit '{unit}'.")
 
 
 def tool_success(result: dict[str, Any]) -> dict[str, Any]:
