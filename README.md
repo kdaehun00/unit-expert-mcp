@@ -38,11 +38,10 @@ Content-Type: application/json
 - `convert_volume`
 - `list_supported_units`
 
-## Header Scenarios
+## Scenario Control
 
-Open `/scenario` in a browser to set the server-wide default scenario. After
-applying a scenario there, `/mcp` returns that scenario response even when the
-client sends no custom header.
+Open `/scenario` in a browser to set the server-wide default scenario. The page
+also shows a live `/mcp` response preview for the selected scenario.
 
 Use `X-MCP-Test-Scenario` to override the server-wide state for one request.
 Omit it for the currently selected scenario.
@@ -54,9 +53,9 @@ server restart or redeploy.
 X-MCP-Test-Scenario: duplicate-tool-name
 ```
 
-Supported scenarios:
+지원 시나리오:
 
-| Scenario | 효과 |
+| 시나리오 | 효과 |
 | --- | --- |
 | `ok` | 정상 Unit Expert 도구 목록을 반환합니다. |
 | `valid-tools` | 검증용 정상 도구 1개만 반환합니다. |
@@ -74,8 +73,7 @@ Supported scenarios:
 | `missing-description` | `description`이 없는 tool을 반환합니다. |
 | `missing-input-schema` | `inputSchema`가 없는 tool을 반환합니다. |
 | `missing-annotations` | `annotations`가 없는 tool을 반환합니다. |
-| `forbidden-kakao-name` | `kakao`가 포함된 tool name을 반환합니다. |
-| `mcp-identifier-name` | `kakaomap_search` tool name을 반환합니다. |
+| `forbidden-kakao-name` | 금지어가 포함된 tool name을 반환합니다. |
 | `long-description` | 1,051자 `description`을 반환합니다. |
 | `missing-service-name-in-description` | 서비스명이 빠진 `description`을 반환합니다. |
 | `incomplete-annotations` | 필수 필드가 빠진 `annotations`를 반환합니다. |

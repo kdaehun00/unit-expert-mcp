@@ -43,8 +43,7 @@ SCENARIO_TITLES = {
     "missing-description": "툴 설명 누락",
     "missing-input-schema": "입력 스키마 누락",
     "missing-annotations": "어노테이션 누락",
-    "forbidden-kakao-name": "금지어 kakao 포함",
-    "mcp-identifier-name": "카카오맵 이름 사용",
+    "forbidden-kakao-name": "금지어 포함 툴 이름",
     "long-description": "너무 긴 설명 반환",
     "missing-service-name-in-description": "서비스명 없는 설명",
     "incomplete-annotations": "불완전한 어노테이션",
@@ -68,8 +67,7 @@ SCENARIO_DESCRIPTIONS = {
     "missing-description": "description이 없는 tool을 반환합니다.",
     "missing-input-schema": "inputSchema가 없는 tool을 반환합니다.",
     "missing-annotations": "annotations가 없는 tool을 반환합니다.",
-    "forbidden-kakao-name": "kakao가 포함된 tool name을 반환합니다.",
-    "mcp-identifier-name": "kakaomap_search tool name을 반환합니다.",
+    "forbidden-kakao-name": "금지어가 포함된 tool name을 반환합니다.",
     "long-description": "1,051자 description을 반환합니다.",
     "missing-service-name-in-description": "서비스명이 빠진 description을 반환합니다.",
     "incomplete-annotations": "필수 필드가 빠진 annotations를 반환합니다.",
@@ -373,8 +371,6 @@ def tools_for_scenario(scenario: str) -> dict[str, Any] | None:
             return {"tools": [tool]}
         case "forbidden-kakao-name":
             return {"tools": [valid_tool("kakao_search")]}
-        case "mcp-identifier-name":
-            return {"tools": [valid_tool("kakaomap_search")]}
         case "long-description":
             return {"tools": [valid_tool("search_place", "a" * 1051)]}
         case "missing-service-name-in-description":
@@ -628,7 +624,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Unit Expert MCP Control</title>
+  <title>Unit Expert MCP 시나리오 제어</title>
   <style>
     :root {{
       color-scheme: light;
@@ -821,21 +817,21 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 <body>
   <main>
     <header>
-      <h1>Unit Expert MCP Control</h1>
+      <h1>Unit Expert MCP 시나리오 제어</h1>
       <div class="endpoint">/mcp</div>
     </header>
     <section class="panel">
       {notice}
       <div class="status">
-        <span>Active scenario</span>
+        <span>현재 시나리오</span>
         <span>
           <strong id="activeTitle">{escape(active_title)}</strong>
           <code id="activeScenario">{escape(active_scenario)}</code>
         </span>
       </div>
       <form id="scenarioForm" method="post" action="/scenario">
-        <select id="scenarioSelect" name="scenario" aria-label="Scenario">{options}</select>
-        <button type="submit">Apply</button>
+        <select id="scenarioSelect" name="scenario" aria-label="시나리오">{options}</select>
+        <button type="submit">적용</button>
       </form>
     </section>
     <div class="workspace">
@@ -850,9 +846,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           {rows}
         </tbody>
       </table>
-      <aside class="terminal" aria-label="MCP response preview">
+      <aside class="terminal" aria-label="MCP 응답 미리보기">
         <div class="terminal-header">
-          <span>/mcp response</span>
+          <span>실제 응답 미리보기</span>
           <span id="terminalScenario">{escape(active_title)}</span>
         </div>
         <pre id="responsePreview">Loading...</pre>
