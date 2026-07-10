@@ -74,6 +74,39 @@ SCENARIO_DESCRIPTIONS = {
     "delayed-response": "OPTIONS가 아닌 /mcp 요청을 5초 지연시킵니다.",
 }
 
+SCENARIO_GROUPS = (
+    ("기본", ("ok", "valid-tools")),
+    (
+        "서버 error",
+        (
+            "auth-401",
+            "auth-403",
+            "no-tools-capability",
+            "tools-list-error",
+            "tools-list-null",
+            "delayed-response",
+        ),
+    ),
+    (
+        "tool error",
+        (
+            "tools-list-empty",
+            "duplicate-tool-name",
+            "too-many-tools",
+            "invalid-tool-name-char",
+            "invalid-tool-name-length",
+            "missing-name",
+            "missing-description",
+            "missing-input-schema",
+            "missing-annotations",
+            "forbidden-kakao-name",
+            "long-description",
+            "missing-service-name-in-description",
+            "incomplete-annotations",
+        ),
+    ),
+)
+
 LENGTH_FACTORS = {
     "mm": 0.001,
     "cm": 0.01,
@@ -589,30 +622,51 @@ def json_rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+def scenario_group_label(scenario: str) -> str:
+    for label, scenarios in SCENARIO_GROUPS:
+        if scenario in scenarios:
+            return label
+    return "기타"
+
+
 def render_scenario_page(message: str | None = None, error: str | None = None) -> str:
     active_scenario = get_active_scenario()
     active_title = SCENARIO_TITLES[active_scenario]
-    rows = "\n".join(
-        f"""
+    active_group = scenario_group_label(active_scenario)
+    row_sections: list[str] = []
+    option_sections: list[str] = []
+    for group_label, scenarios in SCENARIO_GROUPS:
+        row_sections.append(
+            f'<tr class="section-row"><td colspan="2">[{escape(group_label)}]</td></tr>'
+        )
+        option_items: list[str] = []
+        for scenario in scenarios:
+            row_sections.append(
+                f"""
         <tr
           data-scenario="{escape(scenario)}"
           data-title="{escape(SCENARIO_TITLES[scenario])}"
+          data-group="{escape(group_label)}"
           class="{'active' if scenario == active_scenario else ''}"
         >
           <td>
             <strong>{escape(SCENARIO_TITLES[scenario])}</strong>
             <code>{escape(scenario)}</code>
           </td>
-          <td>{escape(description)}</td>
+          <td>{escape(SCENARIO_DESCRIPTIONS[scenario])}</td>
         </tr>
         """
-        for scenario, description in SCENARIO_DESCRIPTIONS.items()
-    )
-    options = "\n".join(
-        f'<option value="{escape(scenario)}" {"selected" if scenario == active_scenario else ""}>'
-        f"{escape(SCENARIO_TITLES[scenario])}</option>"
-        for scenario in SCENARIO_DESCRIPTIONS
-    )
+            )
+            option_items.append(
+                f'<option value="{escape(scenario)}" '
+                f'{"selected" if scenario == active_scenario else ""}>'
+                f"{escape(SCENARIO_TITLES[scenario])}</option>"
+            )
+        option_sections.append(
+            f'<optgroup label="{escape(group_label)}">{"".join(option_items)}</optgroup>'
+        )
+    rows = "\n".join(row_sections)
+    options = "\n".join(option_sections)
     notice = ""
     if message:
         notice = f'<div class="notice success">{escape(message)}</div>'
@@ -772,6 +826,15 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
     tr:last-child td {{ border-bottom: 0; }}
     tr.active td {{ background: #ecfdf9; }}
+    tr.section-row td {{
+      background: #111827;
+      color: #d1fae5;
+      border-bottom-color: #111827;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }}
     .terminal {{
       background: #111827;
       color: #d1fae5;
@@ -826,6 +889,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         <span>현재 시나리오</span>
         <span>
           <strong id="activeTitle">{escape(active_title)}</strong>
+          <code id="activeGroup">{escape(active_group)}</code>
           <code id="activeScenario">{escape(active_scenario)}</code>
         </span>
       </div>
@@ -849,7 +913,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       <aside class="terminal" aria-label="MCP 응답 미리보기">
         <div class="terminal-header">
           <span>실제 응답 미리보기</span>
-          <span id="terminalScenario">{escape(active_title)}</span>
+          <span><span id="terminalGroup">{escape(active_group)}</span> · <span id="terminalScenario">{escape(active_title)}</span></span>
         </div>
         <pre id="responsePreview">Loading...</pre>
       </aside>
@@ -859,7 +923,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const form = document.getElementById("scenarioForm");
     const select = document.getElementById("scenarioSelect");
     const activeScenario = document.getElementById("activeScenario");
+    const activeGroup = document.getElementById("activeGroup");
     const activeTitle = document.getElementById("activeTitle");
+    const terminalGroup = document.getElementById("terminalGroup");
     const terminalScenario = document.getElementById("terminalScenario");
     const preview = document.getElementById("responsePreview");
     const rows = Array.from(document.querySelectorAll("[data-scenario]"));
@@ -886,8 +952,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     function markActive(scenario) {{
       const row = rows.find((candidate) => candidate.dataset.scenario === scenario);
       const title = row ? row.dataset.title : scenario;
+      const group = row ? row.dataset.group : "기타";
       activeScenario.textContent = scenario;
+      activeGroup.textContent = group;
       activeTitle.textContent = title;
+      terminalGroup.textContent = group;
       terminalScenario.textContent = title;
       rows.forEach((row) => {{
         row.classList.toggle("active", row.dataset.scenario === scenario);
@@ -919,7 +988,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     async function refreshPreview() {{
       const scenario = activeScenario.textContent;
       const title = activeTitle.textContent;
-      preview.textContent = `$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /mcp initialize\\n...`;
+      const group = activeGroup.textContent;
+      preview.textContent = `$ 구분: ${{group}}\\n$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /mcp initialize\\n...`;
       try {{
         const initialize = await postMcp({{
           jsonrpc: "2.0",
@@ -938,6 +1008,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           params: {{}}
         }});
         preview.textContent = [
+          `$ 구분: ${{group}}`,
           `$ 시나리오: ${{title}} (${{scenario}})`,
           formatHttp("POST /mcp initialize", initialize),
           "",
@@ -952,7 +1023,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       event.preventDefault();
       const scenario = select.value;
       const title = select.options[select.selectedIndex].text;
-      preview.textContent = `$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /scenario\\n...`;
+      const group = select.options[select.selectedIndex].parentElement.label;
+      preview.textContent = `$ 구분: ${{group}}\\n$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /scenario\\n...`;
       const response = await fetch("/scenario", {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},

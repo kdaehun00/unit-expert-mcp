@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from unit_expert_mcp.server import (
+    SCENARIO_DESCRIPTIONS,
+    SCENARIO_GROUPS,
     SERVER_NAME,
     get_active_scenario,
     handle_json_rpc,
@@ -163,6 +165,17 @@ class MinimalMcpTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["error"]["code"], -32603)
+
+    def test_scenario_groups_cover_every_supported_scenario(self) -> None:
+        grouped_scenarios = [
+            scenario
+            for _, scenarios in SCENARIO_GROUPS
+            for scenario in scenarios
+        ]
+
+        self.assertEqual(set(grouped_scenarios), set(SCENARIO_DESCRIPTIONS))
+        self.assertEqual(len(grouped_scenarios), len(set(grouped_scenarios)))
+        self.assertNotIn("mcp-identifier-name", grouped_scenarios)
 
     def test_active_scenario_can_be_changed_without_header(self) -> None:
         set_active_scenario("tools-list-empty")

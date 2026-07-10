@@ -55,15 +55,28 @@ X-MCP-Test-Scenario: duplicate-tool-name
 
 지원 시나리오:
 
+### 기본
+
 | 시나리오 | 효과 |
 | --- | --- |
 | `ok` | 정상 Unit Expert 도구 목록을 반환합니다. |
 | `valid-tools` | 검증용 정상 도구 1개만 반환합니다. |
+
+### 서버 error
+
+| 시나리오 | 효과 |
+| --- | --- |
 | `auth-401` | JSON-RPC 처리 전에 `401 Unauthorized`를 반환합니다. |
 | `auth-403` | JSON-RPC 처리 전에 `403 Forbidden`을 반환합니다. |
 | `no-tools-capability` | `initialize.result.capabilities.tools`를 제거합니다. |
 | `tools-list-error` | `tools/list`에서 JSON-RPC error를 반환합니다. |
 | `tools-list-null` | `tools/list`에서 `tools: null`을 반환합니다. |
+| `delayed-response` | OPTIONS가 아닌 `/mcp` 요청을 5초 지연시킵니다. |
+
+### tool error
+
+| 시나리오 | 효과 |
+| --- | --- |
 | `tools-list-empty` | `tools/list`에서 `tools: []`를 반환합니다. |
 | `duplicate-tool-name` | 중복된 tool name을 반환합니다. |
 | `too-many-tools` | 도구 21개를 반환합니다. |
@@ -77,7 +90,6 @@ X-MCP-Test-Scenario: duplicate-tool-name
 | `long-description` | 1,051자 `description`을 반환합니다. |
 | `missing-service-name-in-description` | 서비스명이 빠진 `description`을 반환합니다. |
 | `incomplete-annotations` | 필수 필드가 빠진 `annotations`를 반환합니다. |
-| `delayed-response` | OPTIONS가 아닌 `/mcp` 요청을 5초 지연시킵니다. |
 
 ## Run Locally
 
