@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,8 @@ SERVER_VERSION = "1.0.0"
 SERVICE_NAME = "Unit Expert(단위전문가)"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
 LATEST_PROTOCOL_VERSION = "2025-11-25"
+TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
+DEFAULT_DELAY_SECONDS = 5.0
 
 SESSIONS: set[str] = set()
 
@@ -114,7 +117,85 @@ def annotations(title: str) -> dict[str, bool | str]:
     }
 
 
-def handle_json_rpc(payload: Any) -> tuple[int, dict[str, str], dict[str, Any] | None]:
+def normalize_scenario(raw_scenario: str | None) -> str:
+    if not raw_scenario:
+        return "ok"
+    return raw_scenario.strip().lower() or "ok"
+
+
+def valid_tool(name: str, description: str | None = None) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": description or f"{SERVICE_NAME} converts common measurement units.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "value": {"type": "number"},
+            },
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+        "annotations": annotations(name.replace("_", " ").title()),
+    }
+
+
+def tools_for_scenario(scenario: str) -> dict[str, Any] | None:
+    match scenario:
+        case "tools-list-null":
+            return {"tools": None}
+        case "tools-list-empty":
+            return {"tools": []}
+        case "valid-tools":
+            return {"tools": [valid_tool("convert_length")]}
+        case "duplicate-tool-name":
+            return {"tools": [valid_tool("search_place"), valid_tool("search_place")]}
+        case "too-many-tools":
+            return {"tools": [valid_tool(f"tool_{index}") for index in range(21)]}
+        case "invalid-tool-name-char":
+            return {"tools": [valid_tool("search place!")]}
+        case "invalid-tool-name-length":
+            return {"tools": [valid_tool("a" * 129)]}
+        case "missing-name":
+            tool = valid_tool("search_place")
+            tool.pop("name")
+            return {"tools": [tool]}
+        case "missing-description":
+            tool = valid_tool("search_place")
+            tool.pop("description")
+            return {"tools": [tool]}
+        case "missing-input-schema":
+            tool = valid_tool("search_place")
+            tool.pop("inputSchema")
+            return {"tools": [tool]}
+        case "missing-annotations":
+            tool = valid_tool("search_place")
+            tool.pop("annotations")
+            return {"tools": [tool]}
+        case "forbidden-kakao-name":
+            return {"tools": [valid_tool("kakao_search")]}
+        case "mcp-identifier-name":
+            return {"tools": [valid_tool("kakaomap_search")]}
+        case "long-description":
+            return {"tools": [valid_tool("search_place", "a" * 1051)]}
+        case "missing-service-name-in-description":
+            return {"tools": [valid_tool("search_place", "Search places nearby.")]}
+        case "incomplete-annotations":
+            tool = valid_tool("search_place")
+            tool["annotations"] = {
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+            }
+            return {"tools": [tool]}
+        case _:
+            return None
+
+
+def handle_json_rpc(
+    payload: Any,
+    scenario: str = "ok",
+) -> tuple[int, dict[str, str], dict[str, Any] | None]:
+    scenario = normalize_scenario(scenario)
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
         return 400, {}, json_rpc_error(None, -32600, "Invalid Request")
 
@@ -132,9 +213,12 @@ def handle_json_rpc(payload: Any) -> tuple[int, dict[str, str], dict[str, Any] |
             if requested_version in SUPPORTED_PROTOCOL_VERSIONS
             else LATEST_PROTOCOL_VERSION
         )
+        capabilities: dict[str, Any] = {}
+        if scenario != "no-tools-capability":
+            capabilities["tools"] = {"listChanged": True}
         result = {
             "protocolVersion": protocol_version,
-            "capabilities": {"tools": {"listChanged": True}},
+            "capabilities": capabilities,
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         }
         return 200, {"Mcp-Session-Id": session_id}, json_rpc_result(request_id, result)
@@ -146,7 +230,10 @@ def handle_json_rpc(payload: Any) -> tuple[int, dict[str, str], dict[str, Any] |
         return 202 if is_notification else 200, {}, None if is_notification else json_rpc_result(request_id, {})
 
     if method == "tools/list":
-        return 200, {}, json_rpc_result(request_id, {"tools": tools()})
+        if scenario == "tools-list-error":
+            return 200, {}, json_rpc_error(request_id, -32603, "Injected tools/list failure")
+        scenario_tools = tools_for_scenario(scenario)
+        return 200, {}, json_rpc_result(request_id, scenario_tools or {"tools": tools()})
 
     if method == "tools/call":
         result = call_tool(payload.get("params"))
@@ -270,6 +357,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, "Not found")
             return
 
+        scenario = self.request_scenario()
+        if self.handle_pre_json_rpc_scenario(scenario):
+            return
+
         accept = self.headers.get("Accept", "")
         if "text/event-stream" not in accept:
             self.send_text(400, "Invalid Accept header. Expected TEXT_EVENT_STREAM")
@@ -291,6 +382,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, "Not found")
             return
 
+        scenario = self.request_scenario()
+        if self.handle_pre_json_rpc_scenario(scenario):
+            return
+
         accept = self.headers.get("Accept", "")
         if "application/json" not in accept or "text/event-stream" not in accept:
             self.send_text(400, "Invalid Accept headers. Expected TEXT_EVENT_STREAM and APPLICATION_JSON")
@@ -304,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, json_rpc_error(None, -32700, "Parse error"))
             return
 
-        status, extra_headers, response = handle_json_rpc(payload)
+        status, extra_headers, response = handle_json_rpc(payload, scenario)
         if response is None:
             self.send_response(status)
             self.send_cors_headers()
@@ -350,10 +445,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Access-Control-Allow-Headers",
             requested_headers
-            or "authorization,content-type,accept,mcp-protocol-version,mcp-session-id,*",
+            or "authorization,content-type,accept,mcp-protocol-version,mcp-session-id,x-mcp-test-scenario,*",
         )
         self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id,mcp-session-id,*")
         self.send_header("Vary", "Origin")
+
+    def request_scenario(self) -> str:
+        return normalize_scenario(self.headers.get(TEST_SCENARIO_HEADER))
+
+    def handle_pre_json_rpc_scenario(self, scenario: str) -> bool:
+        if scenario == "delayed-response":
+            time.sleep(DEFAULT_DELAY_SECONDS)
+            return False
+        if scenario == "auth-401":
+            self.send_text(401, "Unauthorized")
+            return True
+        if scenario == "auth-403":
+            self.send_text(403, "Forbidden")
+            return True
+        return False
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"{self.address_string()} - {format % args}")

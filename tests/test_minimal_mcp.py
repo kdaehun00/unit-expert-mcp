@@ -77,6 +77,59 @@ class MinimalMcpTest(unittest.TestCase):
             },
         )
 
+    def test_no_tools_capability_scenario_removes_tools_capability(self) -> None:
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1.0"},
+                },
+            },
+            "no-tools-capability",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["result"]["capabilities"], {})
+
+    def test_duplicate_tool_name_scenario_changes_tools_list(self) -> None:
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            "duplicate-tool-name",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        names = [tool["name"] for tool in payload["result"]["tools"]]
+        self.assertEqual(names, ["search_place", "search_place"])
+
+    def test_tools_list_error_scenario_returns_json_rpc_error(self) -> None:
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            "tools-list-error",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["error"]["code"], -32603)
+
 
 if __name__ == "__main__":
     unittest.main()
