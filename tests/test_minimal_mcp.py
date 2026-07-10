@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import unittest
 
-from unit_expert_mcp.server import SERVER_NAME, handle_json_rpc, tools
+from unit_expert_mcp.server import (
+    SERVER_NAME,
+    get_active_scenario,
+    handle_json_rpc,
+    resolve_scenario,
+    set_active_scenario,
+    tools,
+)
 
 
 class MinimalMcpTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_active_scenario("ok")
+
     def test_initialize_returns_playmcp_supported_protocol_and_session_header(self) -> None:
         status, headers, payload = handle_json_rpc(
             {
@@ -153,6 +163,28 @@ class MinimalMcpTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["error"]["code"], -32603)
+
+    def test_active_scenario_can_be_changed_without_header(self) -> None:
+        set_active_scenario("tools-list-empty")
+
+        self.assertEqual(get_active_scenario(), "tools-list-empty")
+        self.assertEqual(resolve_scenario(None), "tools-list-empty")
+        self.assertEqual(resolve_scenario("duplicate-tool-name"), "duplicate-tool-name")
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            resolve_scenario(None),
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["result"]["tools"], [])
 
 
 if __name__ == "__main__":

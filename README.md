@@ -6,7 +6,7 @@ Minimal Streamable HTTP MCP server for PlayMCP.
 
 ```text
 MCP 이름: Unit Expert(단위전문가)
-MCP 식별자: unit_expert
+MCP 식별자: unitExpert
 MCP URL: https://unit-expert-mcp.onrender.com/mcp
 인증: 없음
 ```
@@ -14,9 +14,12 @@ MCP URL: https://unit-expert-mcp.onrender.com/mcp
 ## HTTP Endpoints
 
 ```text
+GET  /
 GET  /healthz
 POST /mcp
 GET  /mcp
+GET  /scenario
+POST /scenario
 ```
 
 `POST /mcp` expects JSON-RPC with:
@@ -37,8 +40,15 @@ Content-Type: application/json
 
 ## Header Scenarios
 
-Use `X-MCP-Test-Scenario` to change behavior per request. Omit it for the normal
-PlayMCP-compatible path.
+Open `/scenario` in a browser to set the server-wide default scenario. After
+applying a scenario there, `/mcp` returns that scenario response even when the
+client sends no custom header.
+
+Use `X-MCP-Test-Scenario` to override the server-wide state for one request.
+Omit it for the currently selected scenario.
+
+The selected scenario is stored in process memory, so it resets to `ok` after a
+server restart or redeploy.
 
 ```text
 X-MCP-Test-Scenario: duplicate-tool-name
@@ -46,30 +56,30 @@ X-MCP-Test-Scenario: duplicate-tool-name
 
 Supported scenarios:
 
-| Scenario | Effect |
+| Scenario | 효과 |
 | --- | --- |
-| `ok` | Normal Unit Expert tools |
-| `valid-tools` | Returns one validation-friendly tool |
-| `auth-401` | Returns `401 Unauthorized` before JSON-RPC |
-| `auth-403` | Returns `403 Forbidden` before JSON-RPC |
-| `no-tools-capability` | Removes `initialize.result.capabilities.tools` |
-| `tools-list-error` | Returns a JSON-RPC error from `tools/list` |
-| `tools-list-null` | Returns `tools: null` from `tools/list` |
-| `tools-list-empty` | Returns `tools: []` from `tools/list` |
-| `duplicate-tool-name` | Returns duplicate tool names |
-| `too-many-tools` | Returns 21 tools |
-| `invalid-tool-name-char` | Returns a tool name with disallowed characters |
-| `invalid-tool-name-length` | Returns a 129-character tool name |
-| `missing-name` | Returns a tool without `name` |
-| `missing-description` | Returns a tool without `description` |
-| `missing-input-schema` | Returns a tool without `inputSchema` |
-| `missing-annotations` | Returns a tool without `annotations` |
-| `forbidden-kakao-name` | Returns a tool name containing `kakao` |
-| `mcp-identifier-name` | Returns `kakaomap_search` |
-| `long-description` | Returns a 1051-character description |
-| `missing-service-name-in-description` | Returns a description without the server name |
-| `incomplete-annotations` | Returns annotations missing required fields |
-| `delayed-response` | Delays each non-OPTIONS `/mcp` request by 5 seconds |
+| `ok` | 정상 Unit Expert 도구 목록을 반환합니다. |
+| `valid-tools` | 검증용 정상 도구 1개만 반환합니다. |
+| `auth-401` | JSON-RPC 처리 전에 `401 Unauthorized`를 반환합니다. |
+| `auth-403` | JSON-RPC 처리 전에 `403 Forbidden`을 반환합니다. |
+| `no-tools-capability` | `initialize.result.capabilities.tools`를 제거합니다. |
+| `tools-list-error` | `tools/list`에서 JSON-RPC error를 반환합니다. |
+| `tools-list-null` | `tools/list`에서 `tools: null`을 반환합니다. |
+| `tools-list-empty` | `tools/list`에서 `tools: []`를 반환합니다. |
+| `duplicate-tool-name` | 중복된 tool name을 반환합니다. |
+| `too-many-tools` | 도구 21개를 반환합니다. |
+| `invalid-tool-name-char` | 허용되지 않는 문자가 포함된 tool name을 반환합니다. |
+| `invalid-tool-name-length` | 129자 길이의 tool name을 반환합니다. |
+| `missing-name` | `name`이 없는 tool을 반환합니다. |
+| `missing-description` | `description`이 없는 tool을 반환합니다. |
+| `missing-input-schema` | `inputSchema`가 없는 tool을 반환합니다. |
+| `missing-annotations` | `annotations`가 없는 tool을 반환합니다. |
+| `forbidden-kakao-name` | `kakao`가 포함된 tool name을 반환합니다. |
+| `mcp-identifier-name` | `kakaomap_search` tool name을 반환합니다. |
+| `long-description` | 1,051자 `description`을 반환합니다. |
+| `missing-service-name-in-description` | 서비스명이 빠진 `description`을 반환합니다. |
+| `incomplete-annotations` | 필수 필드가 빠진 `annotations`를 반환합니다. |
+| `delayed-response` | OPTIONS가 아닌 `/mcp` 요청을 5초 지연시킵니다. |
 
 ## Run Locally
 

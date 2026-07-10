@@ -6,10 +6,13 @@ import json
 import os
 import time
 import uuid
+from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import isfinite
+from threading import Lock
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 SERVER_NAME = "unitExpert"
 SERVER_VERSION = "1.0.0"
@@ -20,6 +23,33 @@ TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
 DEFAULT_DELAY_SECONDS = 5.0
 
 SESSIONS: set[str] = set()
+SCENARIO_LOCK = Lock()
+ACTIVE_SCENARIO = "ok"
+
+SCENARIO_DESCRIPTIONS = {
+    "ok": "정상 Unit Expert 도구 목록을 반환합니다.",
+    "valid-tools": "검증용 정상 도구 1개만 반환합니다.",
+    "auth-401": "JSON-RPC 처리 전에 401 Unauthorized를 반환합니다.",
+    "auth-403": "JSON-RPC 처리 전에 403 Forbidden을 반환합니다.",
+    "no-tools-capability": "initialize.result.capabilities.tools를 제거합니다.",
+    "tools-list-error": "tools/list에서 JSON-RPC error를 반환합니다.",
+    "tools-list-null": "tools/list에서 tools: null을 반환합니다.",
+    "tools-list-empty": "tools/list에서 tools: []를 반환합니다.",
+    "duplicate-tool-name": "중복된 tool name을 반환합니다.",
+    "too-many-tools": "도구 21개를 반환합니다.",
+    "invalid-tool-name-char": "허용되지 않는 문자가 포함된 tool name을 반환합니다.",
+    "invalid-tool-name-length": "129자 길이의 tool name을 반환합니다.",
+    "missing-name": "name이 없는 tool을 반환합니다.",
+    "missing-description": "description이 없는 tool을 반환합니다.",
+    "missing-input-schema": "inputSchema가 없는 tool을 반환합니다.",
+    "missing-annotations": "annotations가 없는 tool을 반환합니다.",
+    "forbidden-kakao-name": "kakao가 포함된 tool name을 반환합니다.",
+    "mcp-identifier-name": "kakaomap_search tool name을 반환합니다.",
+    "long-description": "1,051자 description을 반환합니다.",
+    "missing-service-name-in-description": "서비스명이 빠진 description을 반환합니다.",
+    "incomplete-annotations": "필수 필드가 빠진 annotations를 반환합니다.",
+    "delayed-response": "OPTIONS가 아닌 /mcp 요청을 5초 지연시킵니다.",
+}
 
 LENGTH_FACTORS = {
     "mm": 0.001,
@@ -244,6 +274,28 @@ def normalize_scenario(raw_scenario: str | None) -> str:
     if not raw_scenario:
         return "ok"
     return raw_scenario.strip().lower() or "ok"
+
+
+def get_active_scenario() -> str:
+    with SCENARIO_LOCK:
+        return ACTIVE_SCENARIO
+
+
+def set_active_scenario(raw_scenario: str | None) -> str:
+    scenario = normalize_scenario(raw_scenario)
+    if scenario not in SCENARIO_DESCRIPTIONS:
+        raise ValueError(f"unknown scenario '{scenario}'")
+
+    global ACTIVE_SCENARIO
+    with SCENARIO_LOCK:
+        ACTIVE_SCENARIO = scenario
+    return scenario
+
+
+def resolve_scenario(raw_header_scenario: str | None) -> str:
+    if raw_header_scenario is not None and raw_header_scenario.strip():
+        return normalize_scenario(raw_header_scenario)
+    return get_active_scenario()
 
 
 def valid_tool(name: str, description: str | None = None) -> dict[str, Any]:
@@ -516,6 +568,360 @@ def json_rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+def render_scenario_page(message: str | None = None, error: str | None = None) -> str:
+    active_scenario = get_active_scenario()
+    rows = "\n".join(
+        f"""
+        <tr data-scenario="{escape(scenario)}" class="{'active' if scenario == active_scenario else ''}">
+          <td><code>{escape(scenario)}</code></td>
+          <td>{escape(description)}</td>
+        </tr>
+        """
+        for scenario, description in SCENARIO_DESCRIPTIONS.items()
+    )
+    options = "\n".join(
+        f'<option value="{escape(scenario)}" {"selected" if scenario == active_scenario else ""}>'
+        f"{escape(scenario)}</option>"
+        for scenario in SCENARIO_DESCRIPTIONS
+    )
+    notice = ""
+    if message:
+        notice = f'<div class="notice success">{escape(message)}</div>'
+    if error:
+        notice = f'<div class="notice error">{escape(error)}</div>'
+
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unit Expert MCP Control</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --surface: #ffffff;
+      --text: #151922;
+      --muted: #5f6875;
+      --line: #dfe3ea;
+      --accent: #0f766e;
+      --accent-strong: #0b5f59;
+      --danger: #b42318;
+      --success: #146c43;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }}
+    main {{
+      width: min(1280px, calc(100vw - 32px));
+      margin: 32px auto;
+    }}
+    header {{
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }}
+    .endpoint {{
+      color: var(--muted);
+      font-size: 13px;
+      word-break: break-all;
+    }}
+    .panel {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 16px;
+    }}
+    .workspace {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(360px, 520px);
+      gap: 16px;
+      align-items: start;
+    }}
+    .status {{
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 8px 16px;
+      margin-bottom: 16px;
+      font-size: 14px;
+    }}
+    .status span:nth-child(odd) {{ color: var(--muted); }}
+    code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      background: #f1f3f6;
+      border: 1px solid #e4e7ec;
+      border-radius: 4px;
+      padding: 2px 5px;
+    }}
+    form {{
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }}
+    select, button {{
+      height: 40px;
+      font: inherit;
+      border-radius: 6px;
+    }}
+    select {{
+      width: 100%;
+      border: 1px solid #cfd5df;
+      background: #fff;
+      color: var(--text);
+      padding: 0 10px;
+    }}
+    button {{
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #fff;
+      padding: 0 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }}
+    button.secondary {{
+      background: #fff;
+      color: var(--accent-strong);
+    }}
+    .notice {{
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      font-size: 14px;
+      border: 1px solid;
+    }}
+    .notice.success {{
+      color: var(--success);
+      background: #edf8f2;
+      border-color: #b7e2c8;
+    }}
+    .notice.error {{
+      color: var(--danger);
+      background: #fff0ed;
+      border-color: #f2b8b0;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    th, td {{
+      text-align: left;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }}
+    th {{
+      color: var(--muted);
+      background: #f5f6f8;
+      font-weight: 600;
+    }}
+    tr:last-child td {{ border-bottom: 0; }}
+    tr.active td {{ background: #ecfdf9; }}
+    .terminal {{
+      background: #111827;
+      color: #d1fae5;
+      border: 1px solid #0f172a;
+      border-radius: 8px;
+      min-height: 520px;
+      overflow: hidden;
+    }}
+    .terminal-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      color: #d1d5db;
+      background: #0f172a;
+      border-bottom: 1px solid #1f2937;
+      font-size: 13px;
+    }}
+    .terminal pre {{
+      margin: 0;
+      padding: 14px;
+      min-height: 474px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.55;
+    }}
+    @media (max-width: 680px) {{
+      header {{ display: block; }}
+      .endpoint {{ margin-top: 8px; }}
+      .status {{ grid-template-columns: 1fr; }}
+      form {{ grid-template-columns: 1fr; }}
+      button {{ width: 100%; }}
+      .workspace {{ grid-template-columns: 1fr; }}
+      .terminal {{ min-height: 360px; }}
+      .terminal pre {{ min-height: 314px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Unit Expert MCP Control</h1>
+      <div class="endpoint">/mcp</div>
+    </header>
+    <section class="panel">
+      {notice}
+      <div class="status">
+        <span>Active scenario</span>
+        <span><code id="activeScenario">{escape(active_scenario)}</code></span>
+        <span>Header override</span>
+        <span><code>{escape(TEST_SCENARIO_HEADER)}</code></span>
+      </div>
+      <form id="scenarioForm" method="post" action="/scenario">
+        <select id="scenarioSelect" name="scenario" aria-label="Scenario">{options}</select>
+        <button type="submit">Apply</button>
+      </form>
+    </section>
+    <div class="workspace">
+      <table>
+        <thead>
+          <tr>
+            <th>Scenario</th>
+            <th>효과</th>
+          </tr>
+        </thead>
+        <tbody id="scenarioRows">
+          {rows}
+        </tbody>
+      </table>
+      <aside class="terminal" aria-label="MCP response preview">
+        <div class="terminal-header">
+          <span>/mcp response</span>
+          <span id="terminalScenario">{escape(active_scenario)}</span>
+        </div>
+        <pre id="responsePreview">Loading...</pre>
+      </aside>
+    </div>
+  </main>
+  <script>
+    const form = document.getElementById("scenarioForm");
+    const select = document.getElementById("scenarioSelect");
+    const activeScenario = document.getElementById("activeScenario");
+    const terminalScenario = document.getElementById("terminalScenario");
+    const preview = document.getElementById("responsePreview");
+    const rows = Array.from(document.querySelectorAll("[data-scenario]"));
+
+    function pretty(value) {{
+      try {{
+        return JSON.stringify(value, null, 2);
+      }} catch (error) {{
+        return String(value);
+      }}
+    }}
+
+    function markActive(scenario) {{
+      activeScenario.textContent = scenario;
+      terminalScenario.textContent = scenario;
+      rows.forEach((row) => {{
+        row.classList.toggle("active", row.dataset.scenario === scenario);
+      }});
+    }}
+
+    async function postMcp(payload) {{
+      const response = await fetch("/mcp", {{
+        method: "POST",
+        headers: {{
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "MCP-Protocol-Version": "2025-03-26"
+        }},
+        body: JSON.stringify(payload)
+      }});
+      const text = await response.text();
+      let body = text;
+      try {{
+        body = JSON.parse(text);
+      }} catch (error) {{}}
+      return {{
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+        body
+      }};
+    }}
+
+    async function refreshPreview() {{
+      const scenario = activeScenario.textContent;
+      preview.textContent = `$ scenario: ${{scenario}}\\n$ POST /mcp initialize\\n...`;
+      try {{
+        const initialize = await postMcp({{
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {{
+            protocolVersion: "2025-03-26",
+            capabilities: {{}},
+            clientInfo: {{ name: "scenario-ui", version: "1.0" }}
+          }}
+        }});
+        const toolsList = await postMcp({{
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list",
+          params: {{}}
+        }});
+        preview.textContent = [
+          `$ scenario: ${{scenario}}`,
+          "$ POST /mcp initialize",
+          pretty(initialize),
+          "",
+          "$ POST /mcp tools/list",
+          pretty(toolsList)
+        ].join("\\n");
+      }} catch (error) {{
+        preview.textContent = `$ scenario: ${{scenario}}\\n${{error && error.stack ? error.stack : error}}`;
+      }}
+    }}
+
+    form.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      const scenario = select.value;
+      preview.textContent = `$ scenario: ${{scenario}}\\n$ POST /scenario\\n...`;
+      const response = await fetch("/scenario", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ scenario }})
+      }});
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {{
+        preview.textContent = pretty({{ status: response.status, body: payload }});
+        return;
+      }}
+      markActive(payload.scenario);
+      refreshPreview();
+    }});
+
+    refreshPreview();
+  </script>
+</body>
+</html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "UnitExpertMCP/1.0"
@@ -526,11 +932,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        if self.path == "/healthz":
+        path = urlparse(self.path).path
+        if path == "/healthz":
             self.send_json(200, {"ok": True, "service": SERVER_NAME})
             return
 
-        if self.path != "/mcp":
+        if path in {"/", "/scenario"}:
+            self.send_html(200, render_scenario_page())
+            return
+
+        if path != "/mcp":
             self.send_text(404, "Not found")
             return
 
@@ -555,7 +966,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b": connected\n\n")
 
     def do_POST(self) -> None:
-        if self.path != "/mcp":
+        path = urlparse(self.path).path
+        if path == "/scenario":
+            self.handle_scenario_update()
+            return
+
+        if path != "/mcp":
             self.send_text(404, "Not found")
             return
 
@@ -588,6 +1004,33 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_json(status, response, extra_headers)
 
+    def handle_scenario_update(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length)
+        content_type = self.headers.get("Content-Type", "")
+
+        try:
+            if "application/json" in content_type:
+                payload = json.loads(raw_body or b"{}")
+                raw_scenario = payload.get("scenario") if isinstance(payload, dict) else None
+            else:
+                form = parse_qs(raw_body.decode("utf-8"))
+                raw_scenario = form.get("scenario", ["ok"])[0]
+
+            scenario = set_active_scenario(raw_scenario)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            if "application/json" in content_type:
+                self.send_json(400, {"ok": False, "error": str(error)})
+                return
+            self.send_html(400, render_scenario_page(error=str(error)))
+            return
+
+        if "application/json" in content_type:
+            self.send_json(200, {"ok": True, "scenario": scenario})
+            return
+
+        self.send_html(200, render_scenario_page(message=f"Applied: {scenario}"))
+
     def send_json(
         self,
         status: int,
@@ -613,6 +1056,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_html(self, status: int, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_cors_headers()
+        self.send_header("Content-Type", "text/html;charset=UTF-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_cors_headers(self) -> None:
         origin = self.headers.get("Origin") or "*"
         requested_headers = self.headers.get("Access-Control-Request-Headers")
@@ -628,7 +1081,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Vary", "Origin")
 
     def request_scenario(self) -> str:
-        return normalize_scenario(self.headers.get(TEST_SCENARIO_HEADER))
+        return resolve_scenario(self.headers.get(TEST_SCENARIO_HEADER))
 
     def handle_pre_json_rpc_scenario(self, scenario: str) -> bool:
         if scenario == "delayed-response":
