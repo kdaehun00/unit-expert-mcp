@@ -28,38 +28,36 @@ ACTIVE_SCENARIO = "ok"
 
 SCENARIO_TITLES = {
     "ok": "정상 응답",
-    "valid-tools": "정상 툴 1개 반환",
-    "auth-401": "인증 실패 401",
-    "auth-403": "권한 없음 403",
-    "no-tools-capability": "툴 기능 없음",
-    "tools-list-error": "툴 목록 에러",
-    "tools-list-null": "툴 목록 null 반환",
-    "tools-list-empty": "빈 툴 목록 반환",
-    "duplicate-tool-name": "중복 툴 이름 반환",
-    "too-many-tools": "너무 많은 툴 반환",
-    "invalid-tool-name-char": "잘못된 툴 이름 문자",
-    "invalid-tool-name-length": "너무 긴 툴 이름",
-    "missing-name": "툴 이름 누락",
-    "missing-description": "툴 설명 누락",
-    "missing-input-schema": "입력 스키마 누락",
-    "missing-annotations": "어노테이션 누락",
-    "forbidden-kakao-name": "금지어 포함 툴 이름",
-    "long-description": "너무 긴 설명 반환",
-    "missing-service-name-in-description": "서비스명 없는 설명",
-    "incomplete-annotations": "불완전한 어노테이션",
-    "delayed-response": "느린 응답",
+    "auth-401": "인증 조건 - 401",
+    "auth-403": "인증 조건 - 403",
+    "unsupported-min-version": "MCP 버전 조건 - 최소 지원 버전",
+    "tools-list-error": "툴 목록 조건 - JSON-RPC 에러",
+    "tools-list-null": "툴 목록 조건 - null 반환",
+    "tools-list-empty": "툴 목록 조건 - 빈 배열 반환",
+    "duplicate-tool-name": "툴 이름 조건 - 중복",
+    "too-many-tools": "툴 개수 조건 - 최대 개수",
+    "invalid-tool-name-char": "툴 이름 조건 - 허용 문자",
+    "invalid-tool-name-length": "툴 이름 조건 - 길이",
+    "missing-name": "툴 필수 속성 - name",
+    "missing-description": "툴 필수 속성 - description",
+    "missing-input-schema": "툴 필수 속성 - inputSchema",
+    "missing-annotations": "툴 필수 속성 - annotations",
+    "forbidden-kakao-name": "툴 이름 조건 - 금지어",
+    "long-description": "툴 설명 조건 - 길이",
+    "missing-service-name-in-description": "툴 설명 조건 - 서비스명",
+    "incomplete-annotations": "툴 annotations 조건 - 필수 힌트",
+    "delayed-response": "응답속도 조건 - 지연",
 }
 
 SCENARIO_DESCRIPTIONS = {
     "ok": "정상 Unit Expert 도구 목록을 반환합니다.",
-    "valid-tools": "검증용 정상 도구 1개만 반환합니다.",
     "auth-401": "JSON-RPC 처리 전에 401 Unauthorized를 반환합니다.",
     "auth-403": "JSON-RPC 처리 전에 403 Forbidden을 반환합니다.",
-    "no-tools-capability": "initialize.result.capabilities.tools를 제거합니다.",
+    "unsupported-min-version": "최소 지원 버전보다 낮은 protocolVersion 2024-03-26을 반환합니다.",
     "tools-list-error": "tools/list에서 JSON-RPC error를 반환합니다.",
     "tools-list-null": "tools/list에서 tools: null을 반환합니다.",
     "tools-list-empty": "tools/list에서 tools: []를 반환합니다.",
-    "duplicate-tool-name": "중복된 tool name을 반환합니다.",
+    "duplicate-tool-name": "동일한 name을 가진 중복 tool을 반환합니다.",
     "too-many-tools": "도구 21개를 반환합니다.",
     "invalid-tool-name-char": "허용되지 않는 문자가 포함된 tool name을 반환합니다.",
     "invalid-tool-name-length": "129자 길이의 tool name을 반환합니다.",
@@ -75,24 +73,24 @@ SCENARIO_DESCRIPTIONS = {
 }
 
 SCENARIO_GROUPS = (
-    ("기본", ("ok", "valid-tools")),
+    ("기본", ("ok",)),
     (
         "서버 error",
         (
             "auth-401",
             "auth-403",
-            "no-tools-capability",
+            "unsupported-min-version",
             "tools-list-error",
             "tools-list-null",
+            "tools-list-empty",
+            "too-many-tools",
             "delayed-response",
         ),
     ),
     (
         "tool error",
         (
-            "tools-list-empty",
             "duplicate-tool-name",
-            "too-many-tools",
             "invalid-tool-name-char",
             "invalid-tool-name-length",
             "missing-name",
@@ -376,8 +374,6 @@ def tools_for_scenario(scenario: str) -> dict[str, Any] | None:
             return {"tools": None}
         case "tools-list-empty":
             return {"tools": []}
-        case "valid-tools":
-            return {"tools": [valid_tool("convert_length")]}
         case "duplicate-tool-name":
             return {"tools": [valid_tool("search_place"), valid_tool("search_place")]}
         case "too-many-tools":
@@ -442,9 +438,9 @@ def handle_json_rpc(
             if requested_version in SUPPORTED_PROTOCOL_VERSIONS
             else LATEST_PROTOCOL_VERSION
         )
-        capabilities: dict[str, Any] = {}
-        if scenario != "no-tools-capability":
-            capabilities["tools"] = {"listChanged": True}
+        if scenario == "unsupported-min-version":
+            protocol_version = "2024-03-26"
+        capabilities: dict[str, Any] = {"tools": {"listChanged": True}}
         result = {
             "protocolVersion": protocol_version,
             "capabilities": capabilities,

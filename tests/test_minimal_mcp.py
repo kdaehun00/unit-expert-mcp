@@ -113,7 +113,7 @@ class MinimalMcpTest(unittest.TestCase):
             },
         )
 
-    def test_no_tools_capability_scenario_removes_tools_capability(self) -> None:
+    def test_unsupported_min_version_scenario_returns_old_protocol_version(self) -> None:
         status, _, payload = handle_json_rpc(
             {
                 "jsonrpc": "2.0",
@@ -125,13 +125,13 @@ class MinimalMcpTest(unittest.TestCase):
                     "clientInfo": {"name": "test", "version": "1.0"},
                 },
             },
-            "no-tools-capability",
+            "unsupported-min-version",
         )
 
         self.assertEqual(status, 200)
         self.assertIsNotNone(payload)
         assert payload is not None
-        self.assertEqual(payload["result"]["capabilities"], {})
+        self.assertEqual(payload["result"]["protocolVersion"], "2024-03-26")
 
     def test_duplicate_tool_name_scenario_changes_tools_list(self) -> None:
         status, _, payload = handle_json_rpc(
