@@ -39,13 +39,13 @@ def test_configure_supported_protocol_versions_updates_sdk_negotiation_state() -
     original_latest_version = mcp_types.LATEST_PROTOCOL_VERSION
 
     try:
-        configured = configure_supported_protocol_versions(("2024-11-05",))
+        configured = configure_supported_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
 
-        assert configured == ("2024-11-05",)
-        assert mcp_version.SUPPORTED_PROTOCOL_VERSIONS == ["2024-11-05"]
-        assert mcp_server_session.SUPPORTED_PROTOCOL_VERSIONS == ["2024-11-05"]
-        assert mcp_streamable_http.SUPPORTED_PROTOCOL_VERSIONS == ["2024-11-05"]
-        assert mcp_types.LATEST_PROTOCOL_VERSION == "2024-11-05"
+        assert configured == DEFAULT_PROTOCOL_VERSIONS
+        assert mcp_version.SUPPORTED_PROTOCOL_VERSIONS == list(DEFAULT_PROTOCOL_VERSIONS)
+        assert mcp_server_session.SUPPORTED_PROTOCOL_VERSIONS == list(DEFAULT_PROTOCOL_VERSIONS)
+        assert mcp_streamable_http.SUPPORTED_PROTOCOL_VERSIONS == list(DEFAULT_PROTOCOL_VERSIONS)
+        assert mcp_types.LATEST_PROTOCOL_VERSION == "2025-11-25"
     finally:
         restore_protocol_versions(original_supported_versions, original_latest_version)
 

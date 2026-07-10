@@ -140,39 +140,21 @@ Smoke test the deployed endpoint:
 curl -i -X POST https://mcp.example.com/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -H 'MCP-Protocol-Version: 2024-11-05' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
 ```
 
-## Mock Protected HTTP Server
+## PlayMCP Registration
 
-For MCP clients that need to verify auth failures without issuing real user
-tokens, run the Streamable HTTP server with mock auth enabled:
-
-```bash
-uv run unit-expert-mcp --transport streamable-http --port 8000 --mock-auth
-```
-
-Requests to `/mcp`, including `initialize`, are checked before JSON-RPC runs:
-
-- Missing or differently named header: `401 Unauthorized`
-- Matching header name with a wrong value: `403 Forbidden`
-- Matching header name and value: request is forwarded to MCP JSON-RPC
-
-The default bypass header is:
+Use the public Streamable HTTP endpoint without authentication:
 
 ```text
-X-MCP-Mock-Auth: allow
+https://unit-expert-mcp.onrender.com/mcp
 ```
 
-The successful JSON-RPC endpoint is still:
-
-```text
-http://localhost:8000/mcp
-```
-
-Streamable HTTP transport is stateless by default, so clients do not need to
-send an `mcp-session-id` header on subsequent requests.
+The server uses stateful Streamable HTTP and returns an `mcp-session-id` header
+from `initialize`. Clients should send that header on subsequent requests in the
+same session.
 
 The server supports MCP protocol versions `2025-03-26`, `2025-06-18`, and
 `2025-11-25` by default. MCP initialization does not return a list of all
@@ -190,70 +172,8 @@ Override this for experiments with:
 uv run unit-expert-mcp \
   --transport streamable-http \
   --port 8000 \
-  --mock-auth \
   --protocol-versions 2025-03-26,2025-06-18,2025-11-25
 ```
-
-You can override the required header:
-
-```bash
-uv run unit-expert-mcp \
-  --transport streamable-http \
-  --port 8000 \
-  --mock-auth \
-  --mock-auth-header X-Local-MCP-Auth \
-  --mock-auth-header-value local-dev
-```
-
-Equivalent environment variables are `MCP_MOCK_AUTH=true`,
-`MCP_MOCK_AUTH_HEADER`, `MCP_MOCK_AUTH_HEADER_VALUE`, and
-`MCP_PROTOCOL_VERSIONS`.
-
-## Validation Scenarios
-
-Run one server and select validation behavior per request with
-`X-MCP-Test-Scenario`:
-
-```bash
-uv run unit-expert-mcp --transport streamable-http --port 8000 --mock-auth
-```
-
-Example request header:
-
-```text
-X-MCP-Test-Scenario: duplicate-tool-name
-```
-
-Supported scenarios:
-
-| Scenario | Effect |
-| --- | --- |
-| `ok` | Normal Unit Expert tools |
-| `valid-tools` | Returns one validation-friendly tool |
-| `auth-401` | Returns `401 Unauthorized` before JSON-RPC |
-| `auth-403` | Returns `403 Forbidden` before JSON-RPC |
-| `no-tools-capability` | Removes `initialize.result.capabilities.tools` |
-| `tools-list-error` | Returns a JSON-RPC error from `tools/list` |
-| `tools-list-null` | Returns `tools: null` from `tools/list` |
-| `tools-list-empty` | Returns `tools: []` from `tools/list` |
-| `duplicate-tool-name` | Returns duplicate tool names |
-| `too-many-tools` | Returns 21 tools |
-| `invalid-tool-name-char` | Returns a tool name with disallowed characters |
-| `invalid-tool-name-length` | Returns a 111-character tool name |
-| `missing-name` | Returns a tool without `name` |
-| `missing-description` | Returns a tool without `description` |
-| `missing-input-schema` | Returns a tool without `inputSchema` |
-| `missing-annotations` | Returns a tool without `annotations` |
-| `forbidden-kakao-name` | Returns a tool name containing `kakao` |
-| `mcp-identifier-name` | Returns `kakaomap_search` |
-| `long-description` | Returns a 1051-character description |
-| `missing-service-name-in-description` | Returns a description without the server name |
-| `incomplete-annotations` | Returns annotations missing required fields |
-| `delayed-response` | Delays each non-OPTIONS `/mcp` request by 5 seconds |
-
-The older CLI flags (`--disable-tools-capability`, `--null-tools-list`,
-`--fail-tools-list`, `--request-delay-seconds`) remain available, but the header
-scenarios avoid restarting the server for each validation case.
 
 ## Client Config Example
 
