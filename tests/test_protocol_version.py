@@ -7,6 +7,7 @@ import mcp.types as mcp_types
 import pytest
 
 from unit_expert_mcp.server import (
+    DEFAULT_PROTOCOL_VERSIONS,
     _parse_protocol_versions,
     _supported_protocol_versions_for,
     configure_supported_protocol_versions,
@@ -19,11 +20,18 @@ def restore_protocol_versions(supported_versions: list[str], latest_version: str
 
 
 def test_supported_protocol_versions_include_default_versions() -> None:
-    assert _supported_protocol_versions_for(("2024-11-05",)) == ["2024-11-05"]
+    assert _supported_protocol_versions_for(DEFAULT_PROTOCOL_VERSIONS) == [
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25",
+    ]
 
 
 def test_parse_protocol_versions_from_comma_separated_value() -> None:
-    assert _parse_protocol_versions("2024-11-05") == ("2024-11-05",)
+    assert _parse_protocol_versions("2025-03-26,2025-11-25") == (
+        "2025-03-26",
+        "2025-11-25",
+    )
 
 
 def test_configure_supported_protocol_versions_updates_sdk_negotiation_state() -> None:

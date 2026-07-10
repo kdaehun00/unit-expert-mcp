@@ -27,13 +27,24 @@ from unit_expert_mcp.converter import (
 Transport = Literal["stdio", "sse", "streamable-http"]
 DEFAULT_MOCK_AUTH_HEADER = "X-MCP-Mock-Auth"
 DEFAULT_MOCK_AUTH_HEADER_VALUE = "allow"
-DEFAULT_PROTOCOL_VERSIONS = ("2024-11-05",)
+DEFAULT_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
 TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
 HEALTH_PATH = "/healthz"
 DEFAULT_DELAY_SECONDS = 5.0
 SDK_SUPPORTED_PROTOCOL_VERSIONS = tuple(mcp_version.SUPPORTED_PROTOCOL_VERSIONS)
 _list_tools_handler: object | None = None
 _default_tools_list_scenario = "ok"
+SERVICE_NAME = "Unit Expert MCP(유닛 익스퍼트 MCP)"
+
+
+def _tool_annotations(title: str) -> mcp_types.ToolAnnotations:
+    return mcp_types.ToolAnnotations(
+        title=title,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
 
 
 def _normalize_scenario(raw_scenario: str | None) -> str:
@@ -591,42 +602,74 @@ mcp = FastMCP(
     "Unit Expert MCP",
     host=os.getenv("MCP_HOST", "127.0.0.1"),
     port=_default_port(),
-    stateless_http=False,
+    stateless_http=True,
     json_response=True,
 )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Convert Length",
+    description=(
+        f"{SERVICE_NAME} converts length values between mm, cm, m, km, in, ft, yd, and mi."
+    ),
+    annotations=_tool_annotations("Convert Length"),
+)
 def convert_length(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
     """Convert length between mm, cm, m, km, in, ft, yd, and mi."""
     return convert_length_value(value, from_unit, to_unit)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Convert Weight",
+    description=f"{SERVICE_NAME} converts weight values between mg, g, kg, t, oz, and lb.",
+    annotations=_tool_annotations("Convert Weight"),
+)
 def convert_weight(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
     """Convert weight between mg, g, kg, t, oz, and lb."""
     return convert_weight_value(value, from_unit, to_unit)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Convert Temperature",
+    description=f"{SERVICE_NAME} converts temperature values between c, f, and k.",
+    annotations=_tool_annotations("Convert Temperature"),
+)
 def convert_temperature(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
     """Convert temperature between c, f, and k."""
     return convert_temperature_value(value, from_unit, to_unit)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Convert Area",
+    description=(
+        f"{SERVICE_NAME} converts area values between mm2, cm2, m2, km2, in2, ft2, yd2, "
+        "and acre."
+    ),
+    annotations=_tool_annotations("Convert Area"),
+)
 def convert_area(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
     """Convert area between mm2, cm2, m2, km2, in2, ft2, yd2, and acre."""
     return convert_area_value(value, from_unit, to_unit)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Convert Volume",
+    description=(
+        f"{SERVICE_NAME} converts volume values between ml, l, m3, in3, ft3, cup, pt, qt, "
+        "gal, and floz."
+    ),
+    annotations=_tool_annotations("Convert Volume"),
+)
 def convert_volume(value: float, from_unit: str, to_unit: str) -> dict[str, float | str]:
     """Convert volume between ml, l, m3, in3, ft3, cup, pt, qt, gal, and floz."""
     return convert_volume_value(value, from_unit, to_unit)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Supported Units",
+    description=f"{SERVICE_NAME} lists supported canonical units by conversion category.",
+    annotations=_tool_annotations("List Supported Units"),
+)
 def list_supported_units() -> dict[str, tuple[str, ...]]:
     """List supported canonical units by conversion category."""
     return list_supported_units_value()
@@ -772,10 +815,10 @@ def main() -> None:
     parser.add_argument(
         "--stateless-http",
         action="store_true",
-        default=_env_flag("MCP_STATELESS_HTTP"),
+        default=_env_flag("MCP_STATELESS_HTTP", True),
         help=(
             "Do not issue or require mcp-session-id headers for Streamable HTTP. "
-            "By default the HTTP transport is stateful and returns mcp-session-id."
+            "Defaults to MCP_STATELESS_HTTP or true."
         ),
     )
     args = parser.parse_args()
