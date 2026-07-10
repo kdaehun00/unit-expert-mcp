@@ -171,19 +171,18 @@ The successful JSON-RPC endpoint is still:
 http://localhost:8000/mcp
 ```
 
-Streamable HTTP is stateful by default. The `initialize` response includes an
-`mcp-session-id` header, and clients should send that same header on subsequent
-`GET`, `POST`, and `DELETE` requests for the session.
+Streamable HTTP transport is stateless by default, so clients do not need to
+send an `mcp-session-id` header on subsequent requests.
 
-The server supports only MCP protocol version `2024-11-05` by default. MCP
-initialization does not return a list of all supported versions. The client sends
-one `initialize.params.protocolVersion`, and the server responds with the single
-protocol version it will use.
+The server supports MCP protocol versions `2025-03-26`, `2025-06-18`, and
+`2025-11-25` by default. MCP initialization does not return a list of all
+supported versions. The client sends one `initialize.params.protocolVersion`,
+and the server responds with the single protocol version it will use.
 
 During `initialize`:
 
-- Client requests `2024-11-05`: server responds `2024-11-05`
-- Client requests any other version: server responds `2024-11-05`
+- Client requests `2025-03-26`: server responds `2025-03-26`
+- Client requests `2025-11-25`: server responds `2025-11-25`
 
 Override this for experiments with:
 
@@ -192,7 +191,7 @@ uv run unit-expert-mcp \
   --transport streamable-http \
   --port 8000 \
   --mock-auth \
-  --protocol-versions 2024-11-05
+  --protocol-versions 2025-03-26,2025-06-18,2025-11-25
 ```
 
 You can override the required header:

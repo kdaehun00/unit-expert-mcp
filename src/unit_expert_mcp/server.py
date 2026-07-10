@@ -12,6 +12,7 @@ import anyio
 import mcp.shared.version as mcp_version
 import mcp.types as mcp_types
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -31,6 +32,11 @@ DEFAULT_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
 TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
 HEALTH_PATH = "/healthz"
 DEFAULT_DELAY_SECONDS = 5.0
+CORS_ALLOWED_ORIGINS = (
+    "https://playmcp.kakao.com",
+    "https://sandbox-playmcp.kakao.com",
+    "https://developers.kakao.com",
+)
 SDK_SUPPORTED_PROTOCOL_VERSIONS = tuple(mcp_version.SUPPORTED_PROTOCOL_VERSIONS)
 _list_tools_handler: object | None = None
 _default_tools_list_scenario = "ok"
@@ -693,6 +699,13 @@ def streamable_http_app_with_optional_mock_auth(
         app,
         path=mcp.settings.streamable_http_path,
         delay_seconds=request_delay_seconds,
+    )
+    app = CORSMiddleware(
+        app,
+        allow_origins=list(CORS_ALLOWED_ORIGINS),
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+        expose_headers=["mcp-session-id"],
     )
     if not mock_auth_required:
         return app

@@ -13,6 +13,7 @@ from unit_expert_mcp.server import (
     TEST_SCENARIO_HEADER,
     HeaderBypassAuthMiddleware,
     RequestDelayMiddleware,
+    streamable_http_app_with_optional_mock_auth,
 )
 
 
@@ -266,3 +267,55 @@ def test_health_check_returns_ok_without_reaching_inner_app() -> None:
 
     assert status == 200
     assert payload == {"ok": True, "service": "unit-expert-mcp"}
+
+
+def test_streamable_http_app_allows_playmcp_cors_preflight() -> None:
+    async def run(origin: str) -> tuple[int, dict[str, str]]:
+        app = streamable_http_app_with_optional_mock_auth(mock_auth_required=False)
+        messages: list[dict[str, Any]] = []
+        scope: Scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "OPTIONS",
+            "scheme": "http",
+            "path": "/mcp",
+            "raw_path": b"/mcp",
+            "query_string": b"",
+            "headers": [
+                (b"origin", origin.encode("latin-1")),
+                (b"access-control-request-method", b"POST"),
+                (b"access-control-request-headers", b"content-type,mcp-protocol-version"),
+            ],
+            "client": ("127.0.0.1", 50000),
+            "server": ("127.0.0.1", 8000),
+        }
+
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        await app(scope, receive, send)
+
+        response_start = next(
+            message for message in messages if message["type"] == "http.response.start"
+        )
+        response_headers = {
+            name.decode("latin-1"): value.decode("latin-1")
+            for name, value in response_start["headers"]
+        }
+        return response_start["status"], response_headers
+
+    status, headers = anyio.run(run, "https://playmcp.kakao.com")
+
+    assert status == 200
+    assert headers["access-control-allow-origin"] == "https://playmcp.kakao.com"
+    assert "POST" in headers["access-control-allow-methods"]
+
+    status, headers = anyio.run(run, "https://sandbox-playmcp.kakao.com")
+
+    assert status == 200
+    assert headers["access-control-allow-origin"] == "https://sandbox-playmcp.kakao.com"
+    assert "POST" in headers["access-control-allow-methods"]

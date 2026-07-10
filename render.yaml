@@ -12,4 +12,4 @@ services:
       - key: MCP_STATELESS_HTTP
         value: "true"
       - key: MCP_PROTOCOL_VERSIONS
-        value: 2025-03-26,2025-06-18,2025-11-25
+        value: "2025-03-26,2025-06-18,2025-11-25"
