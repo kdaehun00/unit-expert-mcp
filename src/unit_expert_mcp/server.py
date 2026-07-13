@@ -1086,8 +1086,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     .endpoint {{
       color: var(--muted);
       font-size: 13px;
-      background: var(--surface);
-      border: 1px solid var(--line);
+      background: #e9eef7;
+      border: 1px solid #c8d1df;
       border-radius: 8px;
       padding: 14px;
     }}
@@ -1105,6 +1105,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     .endpoint-row code {{
       width: 100%;
       overflow-wrap: anywhere;
+      background: #fff;
+      border-color: #e1e6ef;
     }}
     .title-note {{
       margin-top: 6px;
@@ -1137,12 +1139,13 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       top: 16px;
       max-height: calc(100vh - 32px);
       overflow: auto;
+      scrollbar-gutter: stable;
     }}
     .summary-sidebar {{
       display: grid;
       gap: 12px;
-      background: var(--surface);
-      border: 1px solid var(--line);
+      background: #e9eef7;
+      border: 1px solid #c8d1df;
       border-radius: 8px;
       padding: 16px;
     }}
@@ -1193,9 +1196,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       max-width: 100%;
       margin-bottom: 6px;
       padding: 3px 7px;
-      border: 1px solid var(--line);
+      border: 1px solid #d8dee9;
       border-radius: 999px;
-      background: #f5f6f8;
+      background: #fff;
       color: var(--text);
       font-size: 12px;
       overflow-wrap: anywhere;
@@ -1282,6 +1285,20 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 16px;
+    }}
+    .control-card.server-card {{
+      background: #eef6ff;
+    }}
+    .server-card .tool-error-section {{
+      background: #f8fbff;
+      border-color: #cfe0f4;
+    }}
+    .control-card.tool-card {{
+      background: #f6f2e9;
+    }}
+    .tool-card .tool-error-section {{
+      background: #fbf8ef;
+      border-color: #ded6c3;
     }}
     .control-card.full {{
       grid-column: 1 / -1;
@@ -1373,16 +1390,30 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     .tool-error-section {{
       display: grid;
       gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7f8fb;
     }}
     .tool-error-section h3 {{
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
       align-items: center;
-      margin: 0;
+      margin: -4px -4px 2px;
+      padding: 4px 6px;
+      border-radius: 6px;
       color: var(--muted);
       font-size: 13px;
       font-weight: 700;
+    }}
+    .server-card .tool-error-section h3 {{
+      background: #edf6ff;
+      color: #335c85;
+    }}
+    .tool-card .tool-error-section h3 {{
+      background: #f3ecdc;
+      color: #6d5b36;
     }}
     .tool-error-section h3 span {{
       display: inline-flex;
@@ -1407,6 +1438,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     .policy-details {{
       padding: 0;
       overflow: hidden;
+      background: #f7f8fb;
     }}
     .policy-details summary {{
       display: flex;
@@ -1535,7 +1567,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       padding: 9px 10px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #fafbfc;
+      background: #fff;
     }}
     .check-grid .check-row input {{
       grid-area: input;
@@ -1705,32 +1737,25 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       letter-spacing: 0;
     }}
     .terminal-details {{
-      background: var(--surface);
-      border: 1px solid var(--line);
+      background: #e9eef7;
+      border: 1px solid #c8d1df;
       border-radius: 8px;
       overflow: hidden;
     }}
     .terminal-details summary {{
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 12px 14px;
+      gap: 12px;
+      padding: 12px;
       cursor: pointer;
       color: var(--text);
       font-size: 14px;
       font-weight: 700;
+      background: #e9eef7;
     }}
     .terminal-details summary::-webkit-details-marker {{
       display: none;
-    }}
-    .terminal-details summary::before {{
-      content: "▸";
-      color: var(--muted);
-      font-size: 12px;
-    }}
-    .terminal-details[open] summary::before {{
-      content: "▾";
     }}
     .terminal-details[open] summary {{
       border-bottom: 1px solid var(--line);
@@ -1741,12 +1766,52 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       gap: 8px;
       min-width: 0;
     }}
+    .terminal-summary-label::before {{
+      content: "▸";
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: #e7ecf5;
+      color: #475569;
+      font-size: 11px;
+      flex: 0 0 auto;
+    }}
+    .terminal-details[open] .terminal-summary-label::before {{
+      content: "▾";
+    }}
     .terminal-summary-context {{
       color: var(--muted);
       font-size: 12px;
       font-weight: 500;
       overflow-wrap: anywhere;
-      text-align: right;
+    }}
+    .terminal-summary-text {{
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }}
+    .terminal-toggle-label {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid #c7d0dd;
+      border-radius: 999px;
+      color: #475569;
+      background: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .terminal-toggle-label::before {{
+      content: "펼쳐보기";
+    }}
+    .terminal-details[open] .terminal-toggle-label::before {{
+      content: "접기";
     }}
     .terminal {{
       background: #111827;
@@ -1822,7 +1887,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         <span id="activeGroup" hidden>{escape(active_group)}</span>
         <span id="activeScenario" hidden>{escape(active_scenario)}</span>
         <div class="control-grid">
-          <section class="control-card full">
+          <section class="control-card full server-card">
             <div class="card-title">
               <h2>server 에러 시나리오</h2>
               <span class="step-badge">1</span>
@@ -1834,7 +1899,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
               {server_error_controls}
             </div>
           </section>
-          <section class="control-card full">
+          <section class="control-card full tool-card">
             <div class="card-title">
               <h2>tools 에러 시나리오</h2>
               <span class="step-badge">2</span>
@@ -1886,8 +1951,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         </section>
         <details class="terminal-details">
           <summary>
-            <span class="terminal-summary-label">실제 응답 미리보기</span>
-            <span class="terminal-summary-context">MCP 요청과 반환 응답을 JSON으로 확인합니다.</span>
+            <span class="terminal-summary-text">
+              <span class="terminal-summary-label">실제 응답 미리보기</span>
+              <span class="terminal-summary-context">MCP 요청과 반환 응답을 JSON으로 확인합니다.</span>
+            </span>
+            <span class="terminal-toggle-label" aria-hidden="true"></span>
           </summary>
           <section class="terminal" aria-label="MCP 응답 미리보기">
             <pre id="responsePreview">Loading...</pre>
