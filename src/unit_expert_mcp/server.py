@@ -992,7 +992,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     tool_error_controls = "\n".join(tool_error_sections)
     policy_reference_sections: list[str] = []
     for section_label, groups in (
-        ("서버측 에러 시나리오", SERVER_ERROR_GROUPS),
+        ("server 에러 시나리오", SERVER_ERROR_GROUPS),
         ("tools 에러 시나리오", TOOL_ERROR_GROUPS),
     ):
         group_cards = []
@@ -1824,11 +1824,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         <div class="control-grid">
           <section class="control-card full">
             <div class="card-title">
-              <h2>서버측 에러 시나리오</h2>
+              <h2>server 에러 시나리오</h2>
               <span class="step-badge">1</span>
             </div>
             <p class="section-hint">
-              MCP 연결, initialize, tools/list 단계에서 발생시키고 싶은 서버측 응답을 선택합니다.
+              MCP 연결, initialize, tools/list 단계에서 발생시키고 싶은 server 응답을 선택합니다.
             </p>
             <div class="check-grid two-column" id="serverErrorGrid">
               {server_error_controls}
@@ -1840,7 +1840,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
               <span class="step-badge">2</span>
             </div>
             <div id="toolErrorDisabledNote" class="muted-note">
-              tools/list 응답 시나리오가 먼저 적용됩니다. tools 에러 시나리오를 사용하려면 서버측 에러 시나리오의 tools/list 응답 선택을 해제해 주세요.
+              tools/list 응답 시나리오가 먼저 적용됩니다. tools 에러 시나리오를 사용하려면 server 에러 시나리오의 tools/list 응답 선택을 해제해 주세요.
             </div>
             <div class="check-grid two-column" id="toolErrorGrid">
               {tool_error_controls}
@@ -1875,7 +1875,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           </div>
           <dl class="summary-list">
             <div class="summary-item">
-              <dt>서버측 에러 시나리오</dt>
+              <dt>server 에러 시나리오</dt>
               <dd id="summaryServerScenarios">-</dd>
             </div>
             <div class="summary-item">
@@ -1915,6 +1915,19 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     function clone(value) {{
       return JSON.parse(JSON.stringify(value));
+    }}
+
+    function setButtonBusy(button, label) {{
+      button.textContent = label;
+      button.disabled = true;
+    }}
+
+    function flashButton(button, label, resetLabel) {{
+      button.textContent = label;
+      button.disabled = false;
+      window.setTimeout(() => {{
+        button.textContent = resetLabel;
+      }}, 1100);
     }}
 
     function pretty(value) {{
@@ -2179,13 +2192,16 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     applyConfig.addEventListener("click", async () => {{
       const config = collectConfig();
       updateSummary(config, false);
+      setButtonBusy(applyConfig, "적용 중");
       preview.textContent = "$ POST /scenario\\n...";
       try {{
         const appliedConfig = await postConfig(config);
         setControls(appliedConfig);
         updateSummary(appliedConfig, true);
+        flashButton(applyConfig, "적용됨", "적용");
         await refreshPreview(appliedConfig);
       }} catch (error) {{
+        flashButton(applyConfig, "실패", "적용");
         preview.textContent = error && error.stack ? error.stack : String(error);
       }}
     }});
@@ -2193,13 +2209,16 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     resetConfig.addEventListener("click", async () => {{
       const config = clone(defaultConfig);
       setControls(config);
+      setButtonBusy(resetConfig, "초기화 중");
       preview.textContent = "$ POST /scenario\\n...";
       try {{
         const appliedConfig = await postConfig(config);
         setControls(appliedConfig);
         updateSummary(appliedConfig, true);
+        flashButton(resetConfig, "초기화됨", "초기화");
         await refreshPreview(appliedConfig);
       }} catch (error) {{
+        flashButton(resetConfig, "실패", "초기화");
         preview.textContent = error && error.stack ? error.stack : String(error);
       }}
     }});
