@@ -21,6 +21,7 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
 DEFAULT_DELAY_SECONDS = 5.0
+PUBLIC_MCP_URL = "https://unit-expert-mcp.onrender.com/mcp"
 
 SESSIONS: set[str] = set()
 SCENARIO_LOCK = Lock()
@@ -53,7 +54,7 @@ SCENARIO_DESCRIPTIONS = {
     "ok": "정상 Unit Expert 도구 목록을 반환합니다.",
     "auth-401": "JSON-RPC 처리 전에 401 Unauthorized를 반환합니다.",
     "auth-403": "JSON-RPC 처리 전에 403 Forbidden을 반환합니다.",
-    "unsupported-min-version": "최소 지원 버전보다 낮은 protocolVersion 2024-03-26을 반환합니다.",
+    "unsupported-min-version": "최소 지원 버전보다 낮은 protocolVersion 2024-11-05를 반환합니다.",
     "tools-list-error": "tools/list에서 JSON-RPC error를 반환합니다.",
     "tools-list-null": "tools/list에서 tools: null을 반환합니다.",
     "tools-list-empty": "tools/list에서 tools: []를 반환합니다.",
@@ -439,7 +440,7 @@ def handle_json_rpc(
             else LATEST_PROTOCOL_VERSION
         )
         if scenario == "unsupported-min-version":
-            protocol_version = "2024-03-26"
+            protocol_version = "2024-11-05"
         capabilities: dict[str, Any] = {"tools": {"listChanged": True}}
         result = {
             "protocolVersion": protocol_version,
@@ -702,7 +703,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
     header {{
       display: flex;
-      align-items: flex-end;
+      align-items: flex-start;
       justify-content: space-between;
       gap: 16px;
       margin-bottom: 18px;
@@ -716,7 +717,22 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     .endpoint {{
       color: var(--muted);
       font-size: 13px;
-      word-break: break-all;
+      min-width: min(520px, 100%);
+    }}
+    .endpoint-label {{
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-weight: 600;
+    }}
+    .endpoint-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }}
+    .endpoint-row code {{
+      width: 100%;
+      overflow-wrap: anywhere;
     }}
     .panel {{
       background: var(--surface);
@@ -778,6 +794,12 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       padding: 0 14px;
       cursor: pointer;
       font-weight: 600;
+    }}
+    .copy-button {{
+      height: 30px;
+      padding: 0 10px;
+      font-size: 13px;
+      white-space: nowrap;
     }}
     button.secondary {{
       background: #fff;
@@ -864,6 +886,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     @media (max-width: 680px) {{
       header {{ display: block; }}
       .endpoint {{ margin-top: 8px; }}
+      .endpoint-row {{ grid-template-columns: 1fr; }}
       .status {{ grid-template-columns: 1fr; }}
       form {{ grid-template-columns: 1fr; }}
       button {{ width: 100%; }}
@@ -877,7 +900,13 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
   <main>
     <header>
       <h1>Unit Expert MCP 시나리오 제어</h1>
-      <div class="endpoint">/mcp</div>
+      <div class="endpoint">
+        <div class="endpoint-label">MCP URL</div>
+        <div class="endpoint-row">
+          <code id="mcpUrl">{escape(PUBLIC_MCP_URL)}</code>
+          <button id="copyMcpUrl" class="copy-button" type="button">복사</button>
+        </div>
+      </div>
     </header>
     <section class="panel">
       {notice}
@@ -924,6 +953,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const terminalGroup = document.getElementById("terminalGroup");
     const terminalScenario = document.getElementById("terminalScenario");
     const preview = document.getElementById("responsePreview");
+    const copyMcpUrl = document.getElementById("copyMcpUrl");
+    const mcpUrl = document.getElementById("mcpUrl");
     const rows = Array.from(document.querySelectorAll("[data-scenario]"));
 
     function pretty(value) {{
@@ -1033,6 +1064,22 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }}
       markActive(payload.scenario);
       refreshPreview();
+    }});
+
+    copyMcpUrl.addEventListener("click", async () => {{
+      const text = mcpUrl.textContent.trim();
+      try {{
+        await navigator.clipboard.writeText(text);
+        copyMcpUrl.textContent = "복사됨";
+        setTimeout(() => {{
+          copyMcpUrl.textContent = "복사";
+        }}, 1200);
+      }} catch (error) {{
+        copyMcpUrl.textContent = "실패";
+        setTimeout(() => {{
+          copyMcpUrl.textContent = "복사";
+        }}, 1200);
+      }}
     }});
 
     refreshPreview();

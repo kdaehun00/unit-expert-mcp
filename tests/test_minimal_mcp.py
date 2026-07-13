@@ -131,7 +131,7 @@ class MinimalMcpTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNotNone(payload)
         assert payload is not None
-        self.assertEqual(payload["result"]["protocolVersion"], "2024-03-26")
+        self.assertEqual(payload["result"]["protocolVersion"], "2024-11-05")
 
     def test_duplicate_tool_name_scenario_changes_tools_list(self) -> None:
         status, _, payload = handle_json_rpc(

@@ -67,7 +67,7 @@ X-MCP-Test-Scenario: duplicate-tool-name
 | --- | --- | --- |
 | 인증 조건 - 401 | `auth-401` | JSON-RPC 처리 전에 `401 Unauthorized`를 반환합니다. |
 | 인증 조건 - 403 | `auth-403` | JSON-RPC 처리 전에 `403 Forbidden`을 반환합니다. |
-| MCP 버전 조건 - 최소 지원 버전 | `unsupported-min-version` | 최소 지원 버전보다 낮은 `protocolVersion: 2024-03-26`을 반환합니다. |
+| MCP 버전 조건 - 최소 지원 버전 | `unsupported-min-version` | 최소 지원 버전보다 낮은 `protocolVersion: 2024-11-05`를 반환합니다. |
 | 툴 목록 조건 - JSON-RPC 에러 | `tools-list-error` | `tools/list`에서 JSON-RPC error를 반환합니다. |
 | 툴 목록 조건 - null 반환 | `tools-list-null` | `tools/list`에서 `tools: null`을 반환합니다. |
 | 툴 목록 조건 - 빈 배열 반환 | `tools-list-empty` | `tools/list`에서 `tools: []`를 반환합니다. |
