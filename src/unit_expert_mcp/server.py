@@ -1559,6 +1559,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       max-width: 100%;
       margin-left: 0;
     }}
+    .check-grid.is-disabled .check-row {{
+      opacity: 0.58;
+      background: #f3f4f6;
+    }}
     .inline-field {{
       display: grid;
       grid-template-columns: 160px minmax(0, 1fr);
@@ -1582,8 +1586,12 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
     .muted-note {{
       display: none;
-      color: var(--muted);
-      margin: -4px 0 10px;
+      color: #8a4b0f;
+      background: #fff7ed;
+      border: 1px solid #fed7aa;
+      border-radius: 6px;
+      padding: 10px 11px;
+      margin: -4px 0 12px;
       font-size: 13px;
     }}
     .muted-note.visible {{
@@ -1832,7 +1840,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
               <span class="step-badge">2</span>
             </div>
             <div id="toolErrorDisabledNote" class="muted-note">
-              서버측 tools/list 응답 시나리오가 선택되어 있어 tools 에러 시나리오는 응답에 포함되지 않습니다.
+              tools/list 응답 시나리오가 먼저 적용됩니다. tools 에러 시나리오를 사용하려면 서버측 에러 시나리오의 tools/list 응답 선택을 해제해 주세요.
             </div>
             <div class="check-grid two-column" id="toolErrorGrid">
               {tool_error_controls}
@@ -1901,6 +1909,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const applyConfig = document.getElementById("applyConfig");
     const resetConfig = document.getElementById("resetConfig");
     const toolErrorDisabledNote = document.getElementById("toolErrorDisabledNote");
+    const toolErrorGrid = document.getElementById("toolErrorGrid");
     const summaryServerScenarios = document.getElementById("summaryServerScenarios");
     const summaryToolScenarios = document.getElementById("summaryToolScenarios");
 
@@ -2009,6 +2018,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     function syncEnabledStates(config) {{
       const toolErrorsEnabled = config.toolsList.mode === "normal";
       toolErrorDisabledNote.classList.toggle("visible", !toolErrorsEnabled);
+      toolErrorGrid.classList.toggle("is-disabled", !toolErrorsEnabled);
       document.querySelectorAll('input[name="toolErrors"]').forEach((input) => {{
         input.disabled = !toolErrorsEnabled;
         if (!toolErrorsEnabled) {{
