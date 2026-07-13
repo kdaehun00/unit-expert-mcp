@@ -19,6 +19,13 @@ SERVER_VERSION = "1.0.0"
 SERVICE_NAME = "Unit Expert(단위전문가)"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
 LATEST_PROTOCOL_VERSION = "2025-11-25"
+PROTOCOL_VERSION_CHOICES = (
+    ("2024-03-26", "2024-03-26 (스펙에 아예 없는 버전)"),
+    ("2024-11-05", "2024-11-05 (최소 지원 미만)"),
+    ("2025-03-26", "2025-03-26 (최소 지원)"),
+    ("2025-06-18", "2025-06-18 (지원)"),
+    ("2025-11-25", "2025-11-25 (최대 지원)"),
+)
 TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
 DEFAULT_DELAY_SECONDS = 5.0
 PUBLIC_MCP_URL = "https://unit-expert-mcp.onrender.com/mcp"
@@ -26,28 +33,29 @@ PUBLIC_MCP_URL = "https://unit-expert-mcp.onrender.com/mcp"
 SESSIONS: set[str] = set()
 SCENARIO_LOCK = Lock()
 ACTIVE_SCENARIO = "ok"
+ACTIVE_CONFIG: dict[str, Any] = {}
 
 SCENARIO_TITLES = {
     "ok": "정상 응답",
-    "auth-401": "인증 조건 - 401",
-    "auth-403": "인증 조건 - 403",
+    "auth-401": "인증 조건 - 401 반환",
+    "auth-403": "인증 조건 - 403 반환",
     "unsupported-min-version": "MCP 버전 조건 - 최소 지원 버전",
     "tools-list-error": "툴 목록 조건 - JSON-RPC 에러",
     "tools-list-null": "툴 목록 조건 - null 반환",
     "tools-list-empty": "툴 목록 조건 - 빈 배열 반환",
-    "duplicate-tool-name": "툴 이름 조건 - 중복",
+    "duplicate-tool-name": "툴 이름 조건 - 중복되는 툴",
     "too-many-tools": "툴 개수 조건 - 최대 개수",
-    "invalid-tool-name-char": "툴 이름 조건 - 허용 문자",
-    "invalid-tool-name-length": "툴 이름 조건 - 길이",
-    "missing-name": "툴 필수 속성 - name",
-    "missing-description": "툴 필수 속성 - description",
-    "missing-input-schema": "툴 필수 속성 - inputSchema",
-    "missing-annotations": "툴 필수 속성 - annotations",
-    "forbidden-kakao-name": "툴 이름 조건 - 금지어",
-    "long-description": "툴 설명 조건 - 길이",
-    "missing-service-name-in-description": "툴 설명 조건 - 서비스명",
+    "invalid-tool-name-char": "툴 이름 조건 - 허용되지 않는 문자 사용",
+    "invalid-tool-name-length": "툴 이름 조건 - 길이 초과",
+    "missing-name": "툴 필수 속성 - name 없음",
+    "missing-description": "툴 필수 속성 - description 없음",
+    "missing-input-schema": "툴 필수 속성 - inputSchema 없음",
+    "missing-annotations": "툴 필수 속성 - annotations 없음",
+    "forbidden-kakao-name": "툴 이름 조건 - 금지어 사용",
+    "long-description": "툴 설명 조건 - 길이 초과",
+    "missing-service-name-in-description": "툴 설명 조건 - 서비스명 미포함",
     "incomplete-annotations": "툴 annotations 조건 - 필수 힌트",
-    "delayed-response": "응답속도 조건 - 지연",
+    "delayed-response": "응답속도 조건 - 지연 / timeout 발생",
 }
 
 SCENARIO_DESCRIPTIONS = {
@@ -105,6 +113,113 @@ SCENARIO_GROUPS = (
         ),
     ),
 )
+
+SERVER_ERROR_GROUPS = (
+    (
+        "인증/접근",
+        "택 1",
+        (
+            "auth-401",
+            "auth-403",
+        ),
+    ),
+    (
+        "MCP 스펙/응답",
+        "복수 선택 가능",
+        (
+            "unsupported-min-version",
+            "delayed-response",
+        ),
+    ),
+    (
+        "tools/list 응답",
+        "택 1",
+        (
+            "tools-list-error",
+            "tools-list-null",
+            "tools-list-empty",
+            "too-many-tools",
+        ),
+    ),
+)
+
+TOOL_ERROR_SCENARIOS = (
+    "duplicate-tool-name",
+    "invalid-tool-name-char",
+    "invalid-tool-name-length",
+    "missing-name",
+    "missing-description",
+    "missing-input-schema",
+    "missing-annotations",
+    "forbidden-kakao-name",
+    "long-description",
+    "missing-service-name-in-description",
+    "incomplete-annotations",
+)
+
+TOOL_ERROR_GROUPS = (
+    (
+        "툴 이름 조건",
+        "복수 선택 가능",
+        (
+            "duplicate-tool-name",
+            "invalid-tool-name-char",
+            "invalid-tool-name-length",
+            "forbidden-kakao-name",
+        ),
+    ),
+    (
+        "툴 필수 속성",
+        "복수 선택 가능",
+        (
+            "missing-name",
+            "missing-description",
+            "missing-input-schema",
+            "missing-annotations",
+        ),
+    ),
+    (
+        "툴 설명 조건",
+        "복수 선택 가능",
+        (
+            "long-description",
+            "missing-service-name-in-description",
+        ),
+    ),
+    (
+        "툴 annotations 조건",
+        "복수 선택 가능",
+        (
+            "incomplete-annotations",
+        ),
+    ),
+)
+
+TOOLS_LIST_MODES = {
+    "normal": "정상 tools 반환",
+    "json-rpc-error": "JSON-RPC error 반환",
+    "null": "tools: null 반환",
+    "empty": "tools: [] 반환",
+    "too-many": "너무 많은 tools 반환",
+}
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "server": {
+        "httpStatus": 200,
+        "target": "all",
+        "delayEnabled": False,
+        "delaySeconds": DEFAULT_DELAY_SECONDS,
+    },
+    "initialize": {
+        "protocolVersionEnabled": True,
+        "protocolVersion": "2025-03-26",
+    },
+    "toolsList": {
+        "mode": "normal",
+        "tooManyCount": 21,
+    },
+    "toolErrors": [],
+}
 
 LENGTH_FACTORS = {
     "mm": 0.001,
@@ -331,19 +446,134 @@ def normalize_scenario(raw_scenario: str | None) -> str:
     return raw_scenario.strip().lower() or "ok"
 
 
+def default_config() -> dict[str, Any]:
+    return json.loads(json.dumps(DEFAULT_CONFIG))
+
+
+def scenario_to_config(raw_scenario: str | None) -> dict[str, Any]:
+    scenario = normalize_scenario(raw_scenario)
+    config = default_config()
+    if scenario == "auth-401":
+        config["server"]["httpStatus"] = 401
+        return config
+    if scenario == "auth-403":
+        config["server"]["httpStatus"] = 403
+        return config
+    if scenario == "delayed-response":
+        config["server"]["delayEnabled"] = True
+        return config
+    if scenario == "unsupported-min-version":
+        config["initialize"]["protocolVersionEnabled"] = True
+        config["initialize"]["protocolVersion"] = "2024-11-05"
+        return config
+    if scenario == "tools-list-error":
+        config["toolsList"]["mode"] = "json-rpc-error"
+        return config
+    if scenario == "tools-list-null":
+        config["toolsList"]["mode"] = "null"
+        return config
+    if scenario == "tools-list-empty":
+        config["toolsList"]["mode"] = "empty"
+        return config
+    if scenario == "too-many-tools":
+        config["toolsList"]["mode"] = "too-many"
+        return config
+    if scenario in TOOL_ERROR_SCENARIOS:
+        config["toolErrors"] = [scenario]
+        return config
+    return config
+
+
+def normalize_config(raw_config: Any) -> dict[str, Any]:
+    if not isinstance(raw_config, dict):
+        return default_config()
+
+    config = default_config()
+    server = raw_config.get("server") if isinstance(raw_config.get("server"), dict) else {}
+    initialize = raw_config.get("initialize") if isinstance(raw_config.get("initialize"), dict) else {}
+    tools_list = raw_config.get("toolsList") if isinstance(raw_config.get("toolsList"), dict) else {}
+
+    http_status = int(server.get("httpStatus", 200))
+    if http_status not in {200, 401, 403}:
+        raise ValueError("server.httpStatus must be 200, 401, or 403")
+    config["server"]["httpStatus"] = http_status
+
+    target = str(server.get("target", "initialize"))
+    if target not in {"initialize", "all"}:
+        raise ValueError("server.target must be initialize or all")
+    config["server"]["target"] = target
+
+    config["server"]["delayEnabled"] = bool(server.get("delayEnabled", False))
+    delay_seconds = float(server.get("delaySeconds", DEFAULT_DELAY_SECONDS))
+    if delay_seconds < 0 or delay_seconds > 30:
+        raise ValueError("server.delaySeconds must be between 0 and 30")
+    config["server"]["delaySeconds"] = delay_seconds
+
+    config["initialize"]["protocolVersionEnabled"] = bool(
+        initialize.get(
+            "protocolVersionEnabled",
+            config["initialize"]["protocolVersionEnabled"],
+        )
+    )
+    protocol_version = str(
+        initialize.get("protocolVersion", config["initialize"]["protocolVersion"])
+    ).strip()
+    if not protocol_version:
+        raise ValueError("initialize.protocolVersion must not be empty")
+    config["initialize"]["protocolVersion"] = protocol_version
+
+    mode = str(tools_list.get("mode", "normal"))
+    if mode not in TOOLS_LIST_MODES:
+        raise ValueError("toolsList.mode is invalid")
+    config["toolsList"]["mode"] = mode
+
+    too_many_count = int(tools_list.get("tooManyCount", 21))
+    if too_many_count < 1 or too_many_count > 100:
+        raise ValueError("toolsList.tooManyCount must be between 1 and 100")
+    config["toolsList"]["tooManyCount"] = too_many_count
+
+    raw_tool_errors = raw_config.get("toolErrors", [])
+    if not isinstance(raw_tool_errors, list):
+        raise ValueError("toolErrors must be a list")
+    tool_errors = []
+    for tool_error in raw_tool_errors:
+        if tool_error not in TOOL_ERROR_SCENARIOS:
+            raise ValueError(f"unknown tool error '{tool_error}'")
+        if tool_error not in tool_errors:
+            tool_errors.append(tool_error)
+    config["toolErrors"] = tool_errors
+    return config
+
+
+def get_active_config() -> dict[str, Any]:
+    with SCENARIO_LOCK:
+        return json.loads(json.dumps(ACTIVE_CONFIG or DEFAULT_CONFIG))
+
+
+def set_active_config(raw_config: Any) -> dict[str, Any]:
+    config = normalize_config(raw_config)
+    global ACTIVE_CONFIG, ACTIVE_SCENARIO
+    with SCENARIO_LOCK:
+        ACTIVE_CONFIG = config
+        ACTIVE_SCENARIO = "custom"
+    return get_active_config()
+
+
 def get_active_scenario() -> str:
     with SCENARIO_LOCK:
         return ACTIVE_SCENARIO
 
 
 def set_active_scenario(raw_scenario: str | None) -> str:
+    global ACTIVE_SCENARIO, ACTIVE_CONFIG
+
     scenario = normalize_scenario(raw_scenario)
     if scenario not in SCENARIO_DESCRIPTIONS:
         raise ValueError(f"unknown scenario '{scenario}'")
 
-    global ACTIVE_SCENARIO
     with SCENARIO_LOCK:
         ACTIVE_SCENARIO = scenario
+        ACTIVE_CONFIG = scenario_to_config(scenario)
     return scenario
 
 
@@ -351,6 +581,12 @@ def resolve_scenario(raw_header_scenario: str | None) -> str:
     if raw_header_scenario is not None and raw_header_scenario.strip():
         return normalize_scenario(raw_header_scenario)
     return get_active_scenario()
+
+
+def resolve_config(raw_header_scenario: str | None) -> dict[str, Any]:
+    if raw_header_scenario is not None and raw_header_scenario.strip():
+        return scenario_to_config(raw_header_scenario)
+    return get_active_config()
 
 
 def valid_tool(name: str, description: str | None = None) -> dict[str, Any]:
@@ -417,11 +653,73 @@ def tools_for_scenario(scenario: str) -> dict[str, Any] | None:
             return None
 
 
+def mutated_tool_for_error(tool_error: str) -> list[dict[str, Any]]:
+    if tool_error == "duplicate-tool-name":
+        return [valid_tool("search_place"), valid_tool("search_place")]
+    if tool_error == "invalid-tool-name-char":
+        return [valid_tool("search place!")]
+    if tool_error == "invalid-tool-name-length":
+        return [valid_tool("a" * 129)]
+    if tool_error == "missing-name":
+        tool = valid_tool("missing_name_case")
+        tool.pop("name")
+        return [tool]
+    if tool_error == "missing-description":
+        tool = valid_tool("missing_description_case")
+        tool.pop("description")
+        return [tool]
+    if tool_error == "missing-input-schema":
+        tool = valid_tool("missing_input_schema_case")
+        tool.pop("inputSchema")
+        return [tool]
+    if tool_error == "missing-annotations":
+        tool = valid_tool("missing_annotations_case")
+        tool.pop("annotations")
+        return [tool]
+    if tool_error == "forbidden-kakao-name":
+        return [valid_tool("kakao_search")]
+    if tool_error == "long-description":
+        return [valid_tool("long_description_case", "a" * 1051)]
+    if tool_error == "missing-service-name-in-description":
+        return [valid_tool("missing_service_name_case", "Search places nearby.")]
+    if tool_error == "incomplete-annotations":
+        tool = valid_tool("incomplete_annotations_case")
+        tool["annotations"] = {
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
+        return [tool]
+    return []
+
+
+def tools_for_config(config: dict[str, Any]) -> dict[str, Any] | None:
+    tools_list = config["toolsList"]
+    mode = tools_list["mode"]
+    if mode == "null":
+        return {"tools": None}
+    if mode == "empty":
+        return {"tools": []}
+    if mode == "too-many":
+        return {"tools": [valid_tool(f"tool_{index}") for index in range(tools_list["tooManyCount"])]}
+    if mode != "normal":
+        return None
+
+    configured_tools: list[dict[str, Any]] = []
+    for tool_error in config["toolErrors"]:
+        configured_tools.extend(mutated_tool_for_error(tool_error))
+    if configured_tools:
+        return {"tools": configured_tools}
+    return None
+
+
 def handle_json_rpc(
     payload: Any,
     scenario: str = "ok",
+    config: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, str], dict[str, Any] | None]:
     scenario = normalize_scenario(scenario)
+    config = normalize_config(config) if config is not None else scenario_to_config(scenario)
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
         return 400, {}, json_rpc_error(None, -32600, "Invalid Request")
 
@@ -439,8 +737,8 @@ def handle_json_rpc(
             if requested_version in SUPPORTED_PROTOCOL_VERSIONS
             else LATEST_PROTOCOL_VERSION
         )
-        if scenario == "unsupported-min-version":
-            protocol_version = "2024-11-05"
+        if config["initialize"]["protocolVersionEnabled"]:
+            protocol_version = config["initialize"]["protocolVersion"]
         capabilities: dict[str, Any] = {"tools": {"listChanged": True}}
         result = {
             "protocolVersion": protocol_version,
@@ -456,9 +754,9 @@ def handle_json_rpc(
         return 202 if is_notification else 200, {}, None if is_notification else json_rpc_result(request_id, {})
 
     if method == "tools/list":
-        if scenario == "tools-list-error":
+        if config["toolsList"]["mode"] == "json-rpc-error":
             return 200, {}, json_rpc_error(request_id, -32603, "Injected tools/list failure")
-        scenario_tools = tools_for_scenario(scenario)
+        scenario_tools = tools_for_config(config)
         return 200, {}, json_rpc_result(request_id, scenario_tools or {"tools": tools()})
 
     if method == "tools/call":
@@ -628,42 +926,110 @@ def scenario_group_label(scenario: str) -> str:
 
 def render_scenario_page(message: str | None = None, error: str | None = None) -> str:
     active_scenario = get_active_scenario()
-    active_title = SCENARIO_TITLES[active_scenario]
-    active_group = scenario_group_label(active_scenario)
-    row_sections: list[str] = []
-    option_sections: list[str] = []
-    for group_label, scenarios in SCENARIO_GROUPS:
-        row_sections.append(
-            f'<tr class="section-row"><td colspan="2">[{escape(group_label)}]</td></tr>'
-        )
-        option_items: list[str] = []
+    active_config = get_active_config()
+    active_title = SCENARIO_TITLES.get(active_scenario, "커스텀 설정")
+    active_group = scenario_group_label(active_scenario) if active_scenario != "custom" else "커스텀"
+    config_json = json.dumps(active_config, ensure_ascii=False)
+    server_error_sections: list[str] = []
+    for group_label, selection_rule, scenarios in SERVER_ERROR_GROUPS:
+        controls = []
         for scenario in scenarios:
-            row_sections.append(
+            conflict_group = ""
+            if scenario in {"auth-401", "auth-403"}:
+                conflict_group = "auth"
+            if scenario in {
+                "tools-list-error",
+                "tools-list-null",
+                "tools-list-empty",
+                "too-many-tools",
+            }:
+                conflict_group = "tools-list"
+            conflict_attr = (
+                f' data-conflict="{escape(conflict_group)}"' if conflict_group else ""
+            )
+            controls.append(
                 f"""
-        <tr
-          data-scenario="{escape(scenario)}"
-          data-title="{escape(SCENARIO_TITLES[scenario])}"
-          data-group="{escape(group_label)}"
-          class="{'active' if scenario == active_scenario else ''}"
-        >
-          <td>
-            <strong>{escape(SCENARIO_TITLES[scenario])}</strong>
-            <code>{escape(scenario)}</code>
-          </td>
-          <td>{escape(SCENARIO_DESCRIPTIONS[scenario])}</td>
-        </tr>
+        <label class="check-row">
+          <input type="checkbox" name="serverErrors" value="{escape(scenario)}"{conflict_attr}>
+          <span>{escape(SCENARIO_TITLES[scenario])}</span>
+          <code>{escape(scenario)}</code>
+        </label>
         """
             )
-            option_items.append(
-                f'<option value="{escape(scenario)}" '
-                f'{"selected" if scenario == active_scenario else ""}>'
-                f"{escape(SCENARIO_TITLES[scenario])}</option>"
-            )
-        option_sections.append(
-            f'<optgroup label="{escape(group_label)}">{"".join(option_items)}</optgroup>'
+        server_error_sections.append(
+            f"""
+        <section class="tool-error-section">
+          <h3>{escape(group_label)} <span>{escape(selection_rule)}</span></h3>
+          <div class="tool-error-list">
+            {"".join(controls)}
+          </div>
+        </section>
+        """
         )
-    rows = "\n".join(row_sections)
-    options = "\n".join(option_sections)
+    server_error_controls = "\n".join(server_error_sections)
+    tool_error_sections: list[str] = []
+    for group_label, selection_rule, scenarios in TOOL_ERROR_GROUPS:
+        controls = "\n".join(
+            f"""
+        <label class="check-row">
+          <input type="checkbox" name="toolErrors" value="{escape(scenario)}">
+          <span>{escape(SCENARIO_TITLES[scenario])}</span>
+          <code>{escape(scenario)}</code>
+        </label>
+        """
+            for scenario in scenarios
+        )
+        tool_error_sections.append(
+            f"""
+        <section class="tool-error-section">
+          <h3>{escape(group_label)} <span>{escape(selection_rule)}</span></h3>
+          <div class="tool-error-list">
+            {controls}
+          </div>
+        </section>
+        """
+        )
+    tool_error_controls = "\n".join(tool_error_sections)
+    policy_reference_sections: list[str] = []
+    for section_label, groups in (
+        ("서버측 에러 시나리오", SERVER_ERROR_GROUPS),
+        ("tools 에러 시나리오", TOOL_ERROR_GROUPS),
+    ):
+        group_cards = []
+        for group_label, selection_rule, scenarios in groups:
+            items = "\n".join(
+                f"""
+          <li>
+            <div>
+              <strong>{escape(SCENARIO_TITLES[scenario])}</strong>
+              <code>{escape(scenario)}</code>
+            </div>
+            <p>{escape(SCENARIO_DESCRIPTIONS[scenario])}</p>
+          </li>
+          """
+                for scenario in scenarios
+            )
+            group_cards.append(
+                f"""
+        <section class="policy-group">
+          <h3>{escape(group_label)} <span>{escape(selection_rule)}</span></h3>
+          <ul>
+            {items}
+          </ul>
+        </section>
+        """
+            )
+        policy_reference_sections.append(
+            f"""
+      <section class="policy-section">
+        <h3>{escape(section_label)}</h3>
+        <div class="policy-grid">
+          {"".join(group_cards)}
+        </div>
+      </section>
+      """
+        )
+    policy_reference = "\n".join(policy_reference_sections)
     notice = ""
     if message:
         notice = f'<div class="notice success">{escape(message)}</div>'
@@ -675,7 +1041,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Unit Expert MCP 시나리오 제어</title>
+  <title>Unit Expert MCP 상태 제어</title>
   <style>
     :root {{
       color-scheme: light;
@@ -708,6 +1074,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       gap: 16px;
       margin-bottom: 18px;
     }}
+    .header-title {{
+      min-width: 0;
+    }}
     h1 {{
       margin: 0;
       font-size: 24px;
@@ -717,7 +1086,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     .endpoint {{
       color: var(--muted);
       font-size: 13px;
-      min-width: min(520px, 100%);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
     }}
     .endpoint-label {{
       margin-bottom: 6px;
@@ -734,6 +1106,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       width: 100%;
       overflow-wrap: anywhere;
     }}
+    .title-note {{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
     .panel {{
       background: var(--surface);
       border: 1px solid var(--line);
@@ -743,9 +1120,474 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
     .workspace {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(360px, 520px);
+      grid-template-columns: minmax(340px, 460px) minmax(0, 1fr);
       gap: 16px;
       align-items: start;
+    }}
+    .workspace > * {{
+      min-width: 0;
+    }}
+    .right-column {{
+      display: grid;
+      grid-column: 1;
+      grid-row: 1;
+      gap: 16px;
+      min-width: 0;
+      position: sticky;
+      top: 16px;
+      max-height: calc(100vh - 32px);
+      overflow: auto;
+    }}
+    .summary-sidebar {{
+      display: grid;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }}
+    .summary-sidebar h2 {{
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0;
+    }}
+    .summary-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+    .summary-list {{
+      display: grid;
+      gap: 10px;
+      margin: 0;
+    }}
+    .summary-item {{
+      display: grid;
+      gap: 4px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line);
+    }}
+    .summary-item:last-child {{
+      padding-bottom: 0;
+      border-bottom: 0;
+    }}
+    .summary-item dt {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .summary-item dd {{
+      margin: 0;
+      font-size: 14px;
+      color: var(--text);
+      overflow-wrap: anywhere;
+    }}
+    .summary-item code {{
+      width: fit-content;
+      max-width: 100%;
+    }}
+    .summary-chip {{
+      display: block;
+      width: fit-content;
+      max-width: 100%;
+      margin-bottom: 6px;
+      padding: 3px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f5f6f8;
+      color: var(--text);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }}
+    .summary-chip:last-child {{
+      margin-bottom: 0;
+    }}
+    .summary-lines {{
+      display: grid;
+      gap: 6px;
+    }}
+    .summary-line {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }}
+    .summary-line-label {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .left-column {{
+      display: grid;
+      grid-column: 2;
+      grid-row: 1;
+      gap: 16px;
+      min-width: 0;
+    }}
+    .action-buttons {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+      min-width: 0;
+    }}
+    .spec-strip {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }}
+    .spec-strip h2 {{
+      margin: 0 0 12px;
+      font-size: 15px;
+      letter-spacing: 0;
+    }}
+    .server-settings-grid {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }}
+    .setting-block {{
+      display: grid;
+      gap: 7px;
+    }}
+    .setting-heading {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: baseline;
+    }}
+    .setting-heading strong {{
+      font-size: 14px;
+      font-weight: 700;
+    }}
+    .setting-heading span {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .summary {{
+      min-width: 220px;
+      font-size: 13px;
+      color: var(--muted);
+      display: none;
+    }}
+    .control-grid {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }}
+    .control-card {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }}
+    .control-card.full {{
+      grid-column: 1 / -1;
+    }}
+    .control-card h2 {{
+      margin: 0 0 12px;
+      font-size: 15px;
+      letter-spacing: 0;
+    }}
+    .card-title {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }}
+    .card-title h2 {{
+      margin: 0;
+    }}
+    .step-badge {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 28px;
+      height: 24px;
+      border-radius: 999px;
+      background: #e7f6f3;
+      color: var(--accent-strong);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .control-stack {{
+      display: grid;
+      gap: 9px;
+    }}
+    .field-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .field-grid.three {{
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
+    .delay-grid {{
+      grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+      align-items: end;
+    }}
+    .delay-grid .check-row {{
+      min-height: 34px;
+    }}
+    .field {{
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      font-size: 14px;
+    }}
+    .field > span:first-child {{
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .field-title {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: baseline;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .field-hint {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 400;
+    }}
+    .section-hint {{
+      margin: -4px 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .check-grid {{
+      display: grid;
+      gap: 14px;
+    }}
+    .check-grid.two-column {{
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: start;
+    }}
+    .tool-error-section {{
+      display: grid;
+      gap: 8px;
+    }}
+    .tool-error-section h3 {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .tool-error-section h3 span {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      padding: 0 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f5f6f8;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }}
+    .tool-error-list {{
+      display: grid;
+      gap: 6px;
+    }}
+    .policy-reference {{
+      display: grid;
+      gap: 18px;
+    }}
+    .policy-details {{
+      padding: 0;
+      overflow: hidden;
+    }}
+    .policy-details summary {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 16px;
+      cursor: pointer;
+      list-style: none;
+    }}
+    .policy-details summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .policy-details summary::before {{
+      content: "▸";
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .policy-details[open] summary::before {{
+      content: "▾";
+    }}
+    .policy-details[open] summary {{
+      border-bottom: 1px solid var(--line);
+    }}
+    .policy-details h2 {{
+      margin: 0;
+    }}
+    .policy-summary-context {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }}
+    .policy-details .policy-reference {{
+      padding: 16px;
+    }}
+    .policy-section {{
+      display: grid;
+      gap: 10px;
+    }}
+    .policy-section > h3 {{
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: 0;
+    }}
+    .policy-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      align-items: start;
+    }}
+    .policy-group {{
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }}
+    .policy-group h3 {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .policy-group h3 span {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      padding: 0 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f5f6f8;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }}
+    .policy-group ul {{
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }}
+    .policy-group li {{
+      display: grid;
+      gap: 5px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fafbfc;
+    }}
+    .policy-group li > div {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }}
+    .policy-group strong {{
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .policy-group p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .radio-row, .check-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 30px;
+      font-size: 14px;
+    }}
+    .check-grid .check-row {{
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-areas:
+        "input title"
+        "input code";
+      align-items: start;
+      gap: 2px 8px;
+      min-height: 58px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fafbfc;
+    }}
+    .check-grid .check-row input {{
+      grid-area: input;
+      margin-top: 3px;
+    }}
+    .check-grid .check-row span {{
+      grid-area: title;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }}
+    .check-row code {{
+      margin-left: auto;
+      font-size: 11px;
+      max-width: 48%;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }}
+    .check-grid .check-row code {{
+      grid-area: code;
+      width: fit-content;
+      max-width: 100%;
+      margin-left: 0;
+    }}
+    .inline-field {{
+      display: grid;
+      grid-template-columns: 160px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      font-size: 14px;
+    }}
+    input[type="number"], input[type="text"] {{
+      width: 100%;
+      height: 34px;
+      border: 1px solid #cfd5df;
+      border-radius: 6px;
+      padding: 0 10px;
+      font: inherit;
+    }}
+    select:disabled,
+    input:disabled {{
+      color: #98a2b3;
+      background: #f3f4f6;
+      cursor: not-allowed;
+    }}
+    .muted-note {{
+      display: none;
+      color: var(--muted);
+      margin: -4px 0 10px;
+      font-size: 13px;
+    }}
+    .muted-note.visible {{
+      display: block;
     }}
     .status {{
       display: grid;
@@ -825,6 +1667,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     table {{
       width: 100%;
       border-collapse: collapse;
+      table-layout: fixed;
       font-size: 14px;
       background: var(--surface);
       border: 1px solid var(--line);
@@ -853,13 +1696,58 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       font-weight: 700;
       letter-spacing: 0;
     }}
+    .terminal-details {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    .terminal-details summary {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px 14px;
+      cursor: pointer;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 700;
+    }}
+    .terminal-details summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .terminal-details summary::before {{
+      content: "▸";
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .terminal-details[open] summary::before {{
+      content: "▾";
+    }}
+    .terminal-details[open] summary {{
+      border-bottom: 1px solid var(--line);
+    }}
+    .terminal-summary-label {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }}
+    .terminal-summary-context {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      overflow-wrap: anywhere;
+      text-align: right;
+    }}
     .terminal {{
       background: #111827;
       color: #d1fae5;
-      border: 1px solid #0f172a;
-      border-radius: 8px;
-      min-height: 520px;
+      border: 0;
+      border-radius: 0;
+      min-height: 460px;
       overflow: hidden;
+      min-width: 0;
     }}
     .terminal-header {{
       display: flex;
@@ -875,7 +1763,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     .terminal pre {{
       margin: 0;
       padding: 14px;
-      min-height: 474px;
+      min-height: 414px;
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
@@ -883,14 +1771,27 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       font-size: 12px;
       line-height: 1.55;
     }}
-    @media (max-width: 680px) {{
+    @media (max-width: 1080px) {{
       header {{ display: block; }}
-      .endpoint {{ margin-top: 8px; }}
       .endpoint-row {{ grid-template-columns: 1fr; }}
+      .action-buttons {{ justify-content: stretch; }}
       .status {{ grid-template-columns: 1fr; }}
       form {{ grid-template-columns: 1fr; }}
       button {{ width: 100%; }}
       .workspace {{ grid-template-columns: 1fr; }}
+      .left-column, .right-column {{
+        grid-column: auto;
+        grid-row: auto;
+        position: static;
+        max-height: none;
+        overflow: visible;
+      }}
+      .control-grid {{ grid-template-columns: 1fr; }}
+      .server-settings-grid {{ grid-template-columns: 1fr; }}
+      .field-grid, .field-grid.three {{ grid-template-columns: 1fr; }}
+      .check-grid.two-column {{ grid-template-columns: 1fr; }}
+      .policy-grid {{ grid-template-columns: 1fr; }}
+      .inline-field {{ grid-template-columns: 1fr; }}
       .terminal {{ min-height: 360px; }}
       .terminal pre {{ min-height: 314px; }}
     }}
@@ -899,63 +1800,113 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 <body>
   <main>
     <header>
-      <h1>Unit Expert MCP 시나리오 제어</h1>
-      <div class="endpoint">
-        <div class="endpoint-label">MCP URL</div>
-        <div class="endpoint-row">
-          <code id="mcpUrl">{escape(PUBLIC_MCP_URL)}</code>
-          <button id="copyMcpUrl" class="copy-button" type="button">복사</button>
+      <div class="header-title">
+        <h1>Unit Expert MCP 상태 제어</h1>
+        <div class="title-note">
+          MCP 상태는 서버 전역으로 공유됩니다. 여러 사용자가 동시에 적용하면 마지막 적용값으로 바뀔 수 있습니다.
         </div>
       </div>
     </header>
-    <section class="panel">
-      {notice}
-      <div class="status">
-        <span>현재 시나리오</span>
-        <span>
-          <strong id="activeTitle">{escape(active_title)}</strong>
-          <code id="activeGroup">{escape(active_group)}</code>
-          <code id="activeScenario">{escape(active_scenario)}</code>
-        </span>
-      </div>
-      <form id="scenarioForm" method="post" action="/scenario">
-        <select id="scenarioSelect" name="scenario" aria-label="시나리오">{options}</select>
-        <button type="submit">적용</button>
-      </form>
-    </section>
     <div class="workspace">
-      <table>
-        <thead>
-          <tr>
-            <th>시나리오</th>
-            <th>효과</th>
-          </tr>
-        </thead>
-        <tbody id="scenarioRows">
-          {rows}
-        </tbody>
-      </table>
-      <aside class="terminal" aria-label="MCP 응답 미리보기">
-        <div class="terminal-header">
-          <span>실제 응답 미리보기</span>
-          <span><span id="terminalGroup">{escape(active_group)}</span> · <span id="terminalScenario">{escape(active_title)}</span></span>
+      <div class="left-column">
+        {notice}
+        <span id="activeTitle" hidden>{escape(active_title)}</span>
+        <span id="activeGroup" hidden>{escape(active_group)}</span>
+        <span id="activeScenario" hidden>{escape(active_scenario)}</span>
+        <div class="control-grid">
+          <section class="control-card full">
+            <div class="card-title">
+              <h2>서버측 에러 시나리오</h2>
+              <span class="step-badge">1</span>
+            </div>
+            <p class="section-hint">
+              MCP 연결, initialize, tools/list 단계에서 발생시키고 싶은 서버측 응답을 선택합니다.
+            </p>
+            <div class="check-grid two-column" id="serverErrorGrid">
+              {server_error_controls}
+            </div>
+          </section>
+          <section class="control-card full">
+            <div class="card-title">
+              <h2>tools 에러 시나리오</h2>
+              <span class="step-badge">2</span>
+            </div>
+            <div id="toolErrorDisabledNote" class="muted-note">
+              서버측 tools/list 응답 시나리오가 선택되어 있어 tools 에러 시나리오는 응답에 포함되지 않습니다.
+            </div>
+            <div class="check-grid two-column" id="toolErrorGrid">
+              {tool_error_controls}
+            </div>
+          </section>
+          <details class="control-card full policy-details">
+            <summary>
+              <h2>시나리오별 설명</h2>
+              <span class="policy-summary-context">각 시나리오가 어떤 응답을 만드는지 확인합니다.</span>
+            </summary>
+            <div class="policy-reference" id="scenarioRows">
+              {policy_reference}
+            </div>
+          </details>
         </div>
-        <pre id="responsePreview">Loading...</pre>
+      </div>
+      <aside class="right-column">
+        <section class="endpoint" aria-label="MCP URL">
+          <div class="endpoint-label">MCP URL</div>
+          <div class="endpoint-row">
+            <code id="mcpUrl">{escape(PUBLIC_MCP_URL)}</code>
+            <button id="copyMcpUrl" class="copy-button" type="button">복사</button>
+          </div>
+        </section>
+        <section class="summary-sidebar" aria-label="현재 MCP 설정 요약">
+          <div class="summary-header">
+            <h2>현재 설정</h2>
+            <div class="action-buttons">
+              <button id="applyConfig" type="button">적용</button>
+              <button id="resetConfig" class="secondary" type="button">초기화</button>
+            </div>
+          </div>
+          <dl class="summary-list">
+            <div class="summary-item">
+              <dt>서버측 에러 시나리오</dt>
+              <dd id="summaryServerScenarios">-</dd>
+            </div>
+            <div class="summary-item">
+              <dt>tools 에러 시나리오</dt>
+              <dd id="summaryToolScenarios">-</dd>
+            </div>
+          </dl>
+        </section>
+        <details class="terminal-details">
+          <summary>
+            <span class="terminal-summary-label">실제 응답 미리보기</span>
+            <span class="terminal-summary-context">MCP 요청과 반환 응답을 JSON으로 확인합니다.</span>
+          </summary>
+          <section class="terminal" aria-label="MCP 응답 미리보기">
+            <pre id="responsePreview">Loading...</pre>
+          </section>
+        </details>
       </aside>
     </div>
   </main>
   <script>
-    const form = document.getElementById("scenarioForm");
-    const select = document.getElementById("scenarioSelect");
+    const initialConfig = {config_json};
+    const defaultConfig = {json.dumps(DEFAULT_CONFIG, ensure_ascii=False)};
+    const scenarioTitles = {json.dumps(SCENARIO_TITLES, ensure_ascii=False)};
     const activeScenario = document.getElementById("activeScenario");
     const activeGroup = document.getElementById("activeGroup");
     const activeTitle = document.getElementById("activeTitle");
-    const terminalGroup = document.getElementById("terminalGroup");
-    const terminalScenario = document.getElementById("terminalScenario");
     const preview = document.getElementById("responsePreview");
     const copyMcpUrl = document.getElementById("copyMcpUrl");
     const mcpUrl = document.getElementById("mcpUrl");
-    const rows = Array.from(document.querySelectorAll("[data-scenario]"));
+    const applyConfig = document.getElementById("applyConfig");
+    const resetConfig = document.getElementById("resetConfig");
+    const toolErrorDisabledNote = document.getElementById("toolErrorDisabledNote");
+    const summaryServerScenarios = document.getElementById("summaryServerScenarios");
+    const summaryToolScenarios = document.getElementById("summaryToolScenarios");
+
+    function clone(value) {{
+      return JSON.parse(JSON.stringify(value));
+    }}
 
     function pretty(value) {{
       try {{
@@ -976,18 +1927,172 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       ].join("\\n");
     }}
 
-    function markActive(scenario) {{
-      const row = rows.find((candidate) => candidate.dataset.scenario === scenario);
-      const title = row ? row.dataset.title : scenario;
-      const group = row ? row.dataset.group : "기타";
-      activeScenario.textContent = scenario;
+    function selectedToolErrors() {{
+      return Array.from(document.querySelectorAll('input[name="toolErrors"]:checked'))
+        .map((input) => input.value);
+    }}
+
+    function selectedServerErrors() {{
+      return Array.from(document.querySelectorAll('input[name="serverErrors"]:checked'))
+        .map((input) => input.value);
+    }}
+
+    function toolsListModeFromServerErrors(serverErrors) {{
+      if (serverErrors.includes("tools-list-error")) return "json-rpc-error";
+      if (serverErrors.includes("tools-list-null")) return "null";
+      if (serverErrors.includes("tools-list-empty")) return "empty";
+      if (serverErrors.includes("too-many-tools")) return "too-many";
+      return "normal";
+    }}
+
+    function serverErrorsFromConfig(config) {{
+      const scenarios = [];
+      if (config.server.httpStatus === 401) scenarios.push("auth-401");
+      if (config.server.httpStatus === 403) scenarios.push("auth-403");
+      if (config.initialize.protocolVersion !== "2025-03-26") {{
+        scenarios.push("unsupported-min-version");
+      }}
+      if (config.server.delayEnabled) scenarios.push("delayed-response");
+      const modeToScenario = {{
+        "json-rpc-error": "tools-list-error",
+        "null": "tools-list-null",
+        "empty": "tools-list-empty",
+        "too-many": "too-many-tools"
+      }};
+      if (modeToScenario[config.toolsList.mode]) {{
+        scenarios.push(modeToScenario[config.toolsList.mode]);
+      }}
+      return scenarios;
+    }}
+
+    function setControls(config) {{
+      const serverErrors = serverErrorsFromConfig(config);
+      document.querySelectorAll('input[name="serverErrors"]').forEach((input) => {{
+        input.checked = serverErrors.includes(input.value);
+      }});
+      document.querySelectorAll('input[name="toolErrors"]').forEach((input) => {{
+        input.checked = config.toolErrors.includes(input.value);
+      }});
+      syncEnabledStates(config);
+      updateSummary(config, false);
+    }}
+
+    function collectConfig() {{
+      const serverErrors = selectedServerErrors();
+      const mode = toolsListModeFromServerErrors(serverErrors);
+      const toolErrors = mode === "normal" ? selectedToolErrors() : [];
+      return {{
+        server: {{
+          httpStatus: serverErrors.includes("auth-403")
+            ? 403
+            : serverErrors.includes("auth-401")
+              ? 401
+              : 200,
+          target: "all",
+          delayEnabled: serverErrors.includes("delayed-response"),
+          delaySeconds: 5
+        }},
+        initialize: {{
+          protocolVersionEnabled: true,
+          protocolVersion: serverErrors.includes("unsupported-min-version")
+            ? "2024-11-05"
+            : "2025-03-26"
+        }},
+        toolsList: {{
+          mode,
+          tooManyCount: 21
+        }},
+        toolErrors
+      }};
+    }}
+
+    function syncEnabledStates(config) {{
+      const toolErrorsEnabled = config.toolsList.mode === "normal";
+      toolErrorDisabledNote.classList.toggle("visible", !toolErrorsEnabled);
+      document.querySelectorAll('input[name="toolErrors"]').forEach((input) => {{
+        input.disabled = !toolErrorsEnabled;
+        if (!toolErrorsEnabled) {{
+          input.checked = false;
+        }}
+      }});
+    }}
+
+    function enforceExclusiveScenario(input) {{
+      if (!input.checked || !input.dataset.conflict) return;
+      document
+        .querySelectorAll(`input[name="serverErrors"][data-conflict="${{input.dataset.conflict}}"]`)
+        .forEach((candidate) => {{
+          if (candidate !== input) candidate.checked = false;
+        }});
+    }}
+
+    function titleForToolError(error) {{
+      return scenarioTitles[error] || error;
+    }}
+
+    function renderScenarioSummary(element, scenarios) {{
+      if (!scenarios.length) {{
+        element.textContent = "없음";
+        return;
+      }}
+      element.innerHTML = scenarios
+        .map((scenario) => `<span class="summary-chip">${{scenarioTitles[scenario] || scenario}}</span>`)
+        .join("");
+    }}
+
+    function summarizeConfig(config) {{
+      const parts = [];
+      if (config.server.httpStatus !== 200) {{
+        parts.push(`HTTP ${{config.server.httpStatus}}`);
+      }}
+      if (config.server.delayEnabled) {{
+        parts.push(`응답 지연 ${{config.server.delaySeconds}}초`);
+      }}
+      if (config.initialize.protocolVersion !== "2025-03-26") {{
+        parts.push(`protocolVersion ${{config.initialize.protocolVersion}}`);
+      }}
+      if (config.toolsList.mode !== "normal") {{
+        const labels = {{
+          "json-rpc-error": "tools/list JSON-RPC error",
+          "null": "tools: null",
+          "empty": "tools: []",
+          "too-many": `tools ${{config.toolsList.tooManyCount}}개`
+        }};
+        parts.push(labels[config.toolsList.mode] || config.toolsList.mode);
+      }}
+      for (const error of config.toolErrors) {{
+        parts.push(titleForToolError(error));
+      }}
+      return parts.length ? parts.join(" + ") : "정상 응답";
+    }}
+
+    function updateConfigSummary(config) {{
+      renderScenarioSummary(summaryServerScenarios, serverErrorsFromConfig(config));
+      renderScenarioSummary(
+        summaryToolScenarios,
+        config.toolsList.mode === "normal" ? config.toolErrors : []
+      );
+    }}
+
+    function updateSummary(config, applied) {{
+      const hasServerError =
+        config.server.httpStatus !== 200 ||
+        config.server.delayEnabled ||
+        config.initialize.protocolVersion !== "2025-03-26" ||
+        config.toolsList.mode !== "normal";
+      const hasToolError = config.toolErrors.length > 0;
+      const group = hasServerError && hasToolError
+        ? "서버 error + tool error"
+        : hasServerError
+          ? "서버 error"
+          : hasToolError
+            ? "tool error"
+            : "기본";
+      const title = summarizeConfig(config);
+      activeScenario.textContent = applied ? "custom" : "custom · 미적용";
       activeGroup.textContent = group;
       activeTitle.textContent = title;
-      terminalGroup.textContent = group;
-      terminalScenario.textContent = title;
-      rows.forEach((row) => {{
-        row.classList.toggle("active", row.dataset.scenario === scenario);
-      }});
+      updateConfigSummary(config);
     }}
 
     async function postMcp(payload) {{
@@ -1012,11 +2117,23 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }};
     }}
 
-    async function refreshPreview() {{
-      const scenario = activeScenario.textContent;
+    async function postConfig(config) {{
+      const response = await fetch("/scenario", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ config }})
+      }});
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {{
+        throw new Error(pretty({{ status: response.status, body: payload }}));
+      }}
+      return payload.config;
+    }}
+
+    async function refreshPreview(config) {{
       const title = activeTitle.textContent;
       const group = activeGroup.textContent;
-      preview.textContent = `$ 구분: ${{group}}\\n$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /mcp initialize\\n...`;
+      preview.textContent = `$ 구분: ${{group}}\\n$ 설정: ${{title}}\\n$ POST /mcp initialize\\n...`;
       try {{
         const initialize = await postMcp({{
           jsonrpc: "2.0",
@@ -1036,34 +2153,59 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         }});
         preview.textContent = [
           `$ 구분: ${{group}}`,
-          `$ 시나리오: ${{title}} (${{scenario}})`,
+          `$ 설정: ${{title}}`,
+          `$ 적용 JSON`,
+          pretty(config),
+          "",
           formatHttp("POST /mcp initialize", initialize),
           "",
           formatHttp("POST /mcp tools/list", toolsList)
         ].join("\\n");
       }} catch (error) {{
-        preview.textContent = `$ 시나리오: ${{title}} (${{scenario}})\\n${{error && error.stack ? error.stack : error}}`;
+        preview.textContent = `$ 설정: ${{title}}\\n${{error && error.stack ? error.stack : error}}`;
       }}
     }}
 
-    form.addEventListener("submit", async (event) => {{
-      event.preventDefault();
-      const scenario = select.value;
-      const title = select.options[select.selectedIndex].text;
-      const group = select.options[select.selectedIndex].parentElement.label;
-      preview.textContent = `$ 구분: ${{group}}\\n$ 시나리오: ${{title}} (${{scenario}})\\n$ POST /scenario\\n...`;
-      const response = await fetch("/scenario", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify({{ scenario }})
-      }});
-      const payload = await response.json();
-      if (!response.ok || !payload.ok) {{
-        preview.textContent = pretty({{ status: response.status, body: payload }});
-        return;
+    applyConfig.addEventListener("click", async () => {{
+      const config = collectConfig();
+      updateSummary(config, false);
+      preview.textContent = "$ POST /scenario\\n...";
+      try {{
+        const appliedConfig = await postConfig(config);
+        setControls(appliedConfig);
+        updateSummary(appliedConfig, true);
+        await refreshPreview(appliedConfig);
+      }} catch (error) {{
+        preview.textContent = error && error.stack ? error.stack : String(error);
       }}
-      markActive(payload.scenario);
-      refreshPreview();
+    }});
+
+    resetConfig.addEventListener("click", async () => {{
+      const config = clone(defaultConfig);
+      setControls(config);
+      preview.textContent = "$ POST /scenario\\n...";
+      try {{
+        const appliedConfig = await postConfig(config);
+        setControls(appliedConfig);
+        updateSummary(appliedConfig, true);
+        await refreshPreview(appliedConfig);
+      }} catch (error) {{
+        preview.textContent = error && error.stack ? error.stack : String(error);
+      }}
+    }});
+
+    function handleControlChange(event) {{
+      if (event && event.target && event.target.name === "serverErrors") {{
+        enforceExclusiveScenario(event.target);
+      }}
+      const config = collectConfig();
+      syncEnabledStates(config);
+      updateSummary(config, false);
+    }}
+
+    document.querySelectorAll("input, select").forEach((input) => {{
+      input.addEventListener("change", handleControlChange);
+      input.addEventListener("input", handleControlChange);
     }});
 
     copyMcpUrl.addEventListener("click", async () => {{
@@ -1082,7 +2224,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }}
     }});
 
-    refreshPreview();
+    setControls(initialConfig);
+    updateSummary(initialConfig, true);
+    refreshPreview(initialConfig);
   </script>
 </body>
 </html>"""
@@ -1111,8 +2255,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, "Not found")
             return
 
-        scenario = self.request_scenario()
-        if self.handle_pre_json_rpc_scenario(scenario):
+        config = self.request_config()
+        if self.handle_pre_json_rpc_config(config):
             return
 
         accept = self.headers.get("Accept", "")
@@ -1144,10 +2288,6 @@ class Handler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(content_length)
 
-        scenario = self.request_scenario()
-        if self.handle_pre_json_rpc_scenario(scenario):
-            return
-
         accept = self.headers.get("Accept", "")
         if "application/json" not in accept or "text/event-stream" not in accept:
             self.send_text(400, "Invalid Accept headers. Expected TEXT_EVENT_STREAM and APPLICATION_JSON")
@@ -1159,7 +2299,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, json_rpc_error(None, -32700, "Parse error"))
             return
 
-        status, extra_headers, response = handle_json_rpc(payload, scenario)
+        config = self.request_config()
+        if self.handle_pre_json_rpc_config(config, payload.get("method")):
+            return
+
+        status, extra_headers, response = handle_json_rpc(payload, config=config)
         if response is None:
             self.send_response(status)
             self.send_cors_headers()
@@ -1179,12 +2323,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if "application/json" in content_type:
                 payload = json.loads(raw_body or b"{}")
-                raw_scenario = payload.get("scenario") if isinstance(payload, dict) else None
+                if isinstance(payload, dict) and "config" in payload:
+                    config = set_active_config(payload["config"])
+                    scenario = "custom"
+                else:
+                    raw_scenario = payload.get("scenario") if isinstance(payload, dict) else None
+                    scenario = set_active_scenario(raw_scenario)
+                    config = get_active_config()
             else:
                 form = parse_qs(raw_body.decode("utf-8"))
                 raw_scenario = form.get("scenario", ["ok"])[0]
-
-            scenario = set_active_scenario(raw_scenario)
+                scenario = set_active_scenario(raw_scenario)
+                config = get_active_config()
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             if "application/json" in content_type:
                 self.send_json(400, {"ok": False, "error": str(error)})
@@ -1193,7 +2343,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if "application/json" in content_type:
-            self.send_json(200, {"ok": True, "scenario": scenario})
+            self.send_json(200, {"ok": True, "scenario": scenario, "config": config})
             return
 
         self.send_html(200, render_scenario_page(message=f"Applied: {scenario}"))
@@ -1250,14 +2400,28 @@ class Handler(BaseHTTPRequestHandler):
     def request_scenario(self) -> str:
         return resolve_scenario(self.headers.get(TEST_SCENARIO_HEADER))
 
-    def handle_pre_json_rpc_scenario(self, scenario: str) -> bool:
-        if scenario == "delayed-response":
-            time.sleep(DEFAULT_DELAY_SECONDS)
+    def request_config(self) -> dict[str, Any]:
+        return resolve_config(self.headers.get(TEST_SCENARIO_HEADER))
+
+    def handle_pre_json_rpc_config(
+        self,
+        config: dict[str, Any],
+        method: str | None = None,
+    ) -> bool:
+        server = config["server"]
+        if server["delayEnabled"]:
+            time.sleep(server["delaySeconds"])
+
+        http_status = server["httpStatus"]
+        target = server["target"]
+        if http_status == 200:
             return False
-        if scenario == "auth-401":
+        if target == "initialize" and method not in {None, "initialize"}:
+            return False
+        if http_status == 401:
             self.send_text(401, "Unauthorized")
             return True
-        if scenario == "auth-403":
+        if http_status == 403:
             self.send_text(403, "Forbidden")
             return True
         return False

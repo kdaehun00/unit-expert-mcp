@@ -8,7 +8,9 @@ from unit_expert_mcp.server import (
     SERVER_NAME,
     get_active_scenario,
     handle_json_rpc,
+    resolve_config,
     resolve_scenario,
+    set_active_config,
     set_active_scenario,
     tools,
 )
@@ -165,6 +167,78 @@ class MinimalMcpTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["error"]["code"], -32603)
+
+    def test_custom_config_can_combine_initialize_and_tool_errors(self) -> None:
+        config = {
+            "server": {"httpStatus": 200, "target": "initialize"},
+            "initialize": {
+                "protocolVersionEnabled": True,
+                "protocolVersion": "2024-11-05",
+            },
+            "toolsList": {"mode": "normal"},
+            "toolErrors": ["duplicate-tool-name", "missing-description"],
+        }
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1.0"},
+                },
+            },
+            config=config,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["result"]["protocolVersion"], "2024-11-05")
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            config=config,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        listed_tools = payload["result"]["tools"]
+        self.assertEqual([tool.get("name") for tool in listed_tools[:2]], ["search_place", "search_place"])
+        self.assertNotIn("description", listed_tools[2])
+
+    def test_active_custom_config_can_return_many_tools(self) -> None:
+        set_active_config(
+            {
+                "toolsList": {
+                    "mode": "too-many",
+                    "tooManyCount": 25,
+                }
+            }
+        )
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            config=resolve_config(None),
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(len(payload["result"]["tools"]), 25)
 
     def test_scenario_groups_cover_every_supported_scenario(self) -> None:
         grouped_scenarios = [
