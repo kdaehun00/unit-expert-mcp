@@ -240,6 +240,51 @@ class MinimalMcpTest(unittest.TestCase):
         assert payload is not None
         self.assertEqual(len(payload["result"]["tools"]), 25)
 
+    def test_custom_config_can_override_mcp_identifier_and_service_name(self) -> None:
+        config = {
+            "mcp": {
+                "identifier": "unitExpertLocal",
+                "serviceName": "Unit Expert Local(단위전문가 로컬)",
+            }
+        }
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1.0"},
+                },
+            },
+            config=config,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["result"]["serverInfo"]["name"], "unitExpertLocal")
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            config=config,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertIn(
+            "Unit Expert Local(단위전문가 로컬)",
+            payload["result"]["tools"][0]["description"],
+        )
+
     def test_scenario_groups_cover_every_supported_scenario(self) -> None:
         grouped_scenarios = [
             scenario

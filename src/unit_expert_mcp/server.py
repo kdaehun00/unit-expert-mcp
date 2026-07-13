@@ -204,6 +204,10 @@ TOOLS_LIST_MODES = {
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "mcp": {
+        "identifier": SERVER_NAME,
+        "serviceName": SERVICE_NAME,
+    },
     "server": {
         "httpStatus": 200,
         "target": "all",
@@ -366,7 +370,7 @@ SUPPORTED_UNITS = {
 }
 
 
-def tools() -> list[dict[str, Any]]:
+def tools(service_name: str = SERVICE_NAME) -> list[dict[str, Any]]:
     value_unit_schema = {
         "type": "object",
         "properties": {
@@ -381,7 +385,7 @@ def tools() -> list[dict[str, Any]]:
         {
             "name": "convert_length",
             "description": (
-                f"{SERVICE_NAME} converts length values between mm, cm, m, km, in, ft, yd, "
+                f"{service_name} converts length values between mm, cm, m, km, in, ft, yd, "
                 "and mi."
             ),
             "inputSchema": value_unit_schema,
@@ -389,20 +393,20 @@ def tools() -> list[dict[str, Any]]:
         },
         {
             "name": "convert_weight",
-            "description": f"{SERVICE_NAME} converts weight values between mg, g, kg, t, oz, and lb.",
+            "description": f"{service_name} converts weight values between mg, g, kg, t, oz, and lb.",
             "inputSchema": value_unit_schema,
             "annotations": annotations("Convert Weight"),
         },
         {
             "name": "convert_temperature",
-            "description": f"{SERVICE_NAME} converts temperature values between c, f, and k.",
+            "description": f"{service_name} converts temperature values between c, f, and k.",
             "inputSchema": value_unit_schema,
             "annotations": annotations("Convert Temperature"),
         },
         {
             "name": "convert_area",
             "description": (
-                f"{SERVICE_NAME} converts area values between mm2, cm2, m2, km2, in2, ft2, "
+                f"{service_name} converts area values between mm2, cm2, m2, km2, in2, ft2, "
                 "yd2, and acre."
             ),
             "inputSchema": value_unit_schema,
@@ -411,7 +415,7 @@ def tools() -> list[dict[str, Any]]:
         {
             "name": "convert_volume",
             "description": (
-                f"{SERVICE_NAME} converts volume values between ml, l, m3, in3, ft3, cup, "
+                f"{service_name} converts volume values between ml, l, m3, in3, ft3, cup, "
                 "pt, qt, gal, and floz."
             ),
             "inputSchema": value_unit_schema,
@@ -419,7 +423,7 @@ def tools() -> list[dict[str, Any]]:
         },
         {
             "name": "list_supported_units",
-            "description": f"{SERVICE_NAME} lists supported canonical units by conversion category.",
+            "description": f"{service_name} lists supported canonical units by conversion category.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -489,9 +493,24 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
         return default_config()
 
     config = default_config()
+    mcp = raw_config.get("mcp") if isinstance(raw_config.get("mcp"), dict) else {}
     server = raw_config.get("server") if isinstance(raw_config.get("server"), dict) else {}
     initialize = raw_config.get("initialize") if isinstance(raw_config.get("initialize"), dict) else {}
     tools_list = raw_config.get("toolsList") if isinstance(raw_config.get("toolsList"), dict) else {}
+
+    identifier = str(mcp.get("identifier", SERVER_NAME)).strip()
+    if not identifier:
+        raise ValueError("mcp.identifier must not be empty")
+    if len(identifier) > 128:
+        raise ValueError("mcp.identifier must be 128 characters or fewer")
+    config["mcp"]["identifier"] = identifier
+
+    service_name = str(mcp.get("serviceName", SERVICE_NAME)).strip()
+    if not service_name:
+        raise ValueError("mcp.serviceName must not be empty")
+    if len(service_name) > 200:
+        raise ValueError("mcp.serviceName must be 200 characters or fewer")
+    config["mcp"]["serviceName"] = service_name
 
     http_status = int(server.get("httpStatus", 200))
     if http_status not in {200, 401, 403}:
@@ -589,10 +608,14 @@ def resolve_config(raw_header_scenario: str | None) -> dict[str, Any]:
     return get_active_config()
 
 
-def valid_tool(name: str, description: str | None = None) -> dict[str, Any]:
+def valid_tool(
+    name: str,
+    description: str | None = None,
+    service_name: str = SERVICE_NAME,
+) -> dict[str, Any]:
     return {
         "name": name,
-        "description": description or f"{SERVICE_NAME} converts common measurement units.",
+        "description": description or f"{service_name} converts common measurement units.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -653,37 +676,37 @@ def tools_for_scenario(scenario: str) -> dict[str, Any] | None:
             return None
 
 
-def mutated_tool_for_error(tool_error: str) -> list[dict[str, Any]]:
+def mutated_tool_for_error(tool_error: str, service_name: str = SERVICE_NAME) -> list[dict[str, Any]]:
     if tool_error == "duplicate-tool-name":
-        return [valid_tool("search_place"), valid_tool("search_place")]
+        return [valid_tool("search_place", service_name=service_name), valid_tool("search_place", service_name=service_name)]
     if tool_error == "invalid-tool-name-char":
-        return [valid_tool("search place!")]
+        return [valid_tool("search place!", service_name=service_name)]
     if tool_error == "invalid-tool-name-length":
-        return [valid_tool("a" * 129)]
+        return [valid_tool("a" * 129, service_name=service_name)]
     if tool_error == "missing-name":
-        tool = valid_tool("missing_name_case")
+        tool = valid_tool("missing_name_case", service_name=service_name)
         tool.pop("name")
         return [tool]
     if tool_error == "missing-description":
-        tool = valid_tool("missing_description_case")
+        tool = valid_tool("missing_description_case", service_name=service_name)
         tool.pop("description")
         return [tool]
     if tool_error == "missing-input-schema":
-        tool = valid_tool("missing_input_schema_case")
+        tool = valid_tool("missing_input_schema_case", service_name=service_name)
         tool.pop("inputSchema")
         return [tool]
     if tool_error == "missing-annotations":
-        tool = valid_tool("missing_annotations_case")
+        tool = valid_tool("missing_annotations_case", service_name=service_name)
         tool.pop("annotations")
         return [tool]
     if tool_error == "forbidden-kakao-name":
-        return [valid_tool("kakao_search")]
+        return [valid_tool("kakao_search", service_name=service_name)]
     if tool_error == "long-description":
-        return [valid_tool("long_description_case", "a" * 1051)]
+        return [valid_tool("long_description_case", "a" * 1051, service_name=service_name)]
     if tool_error == "missing-service-name-in-description":
-        return [valid_tool("missing_service_name_case", "Search places nearby.")]
+        return [valid_tool("missing_service_name_case", "Search places nearby.", service_name=service_name)]
     if tool_error == "incomplete-annotations":
-        tool = valid_tool("incomplete_annotations_case")
+        tool = valid_tool("incomplete_annotations_case", service_name=service_name)
         tool["annotations"] = {
             "destructiveHint": False,
             "idempotentHint": True,
@@ -696,18 +719,24 @@ def mutated_tool_for_error(tool_error: str) -> list[dict[str, Any]]:
 def tools_for_config(config: dict[str, Any]) -> dict[str, Any] | None:
     tools_list = config["toolsList"]
     mode = tools_list["mode"]
+    service_name = config["mcp"]["serviceName"]
     if mode == "null":
         return {"tools": None}
     if mode == "empty":
         return {"tools": []}
     if mode == "too-many":
-        return {"tools": [valid_tool(f"tool_{index}") for index in range(tools_list["tooManyCount"])]}
+        return {
+            "tools": [
+                valid_tool(f"tool_{index}", service_name=service_name)
+                for index in range(tools_list["tooManyCount"])
+            ]
+        }
     if mode != "normal":
         return None
 
     configured_tools: list[dict[str, Any]] = []
     for tool_error in config["toolErrors"]:
-        configured_tools.extend(mutated_tool_for_error(tool_error))
+        configured_tools.extend(mutated_tool_for_error(tool_error, service_name))
     if configured_tools:
         return {"tools": configured_tools}
     return None
@@ -743,7 +772,7 @@ def handle_json_rpc(
         result = {
             "protocolVersion": protocol_version,
             "capabilities": capabilities,
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "serverInfo": {"name": config["mcp"]["identifier"], "version": SERVER_VERSION},
         }
         return 200, {"Mcp-Session-Id": session_id}, json_rpc_result(request_id, result)
 
@@ -757,7 +786,10 @@ def handle_json_rpc(
         if config["toolsList"]["mode"] == "json-rpc-error":
             return 200, {}, json_rpc_error(request_id, -32603, "Injected tools/list failure")
         scenario_tools = tools_for_config(config)
-        return 200, {}, json_rpc_result(request_id, scenario_tools or {"tools": tools()})
+        return 200, {}, json_rpc_result(
+            request_id,
+            scenario_tools or {"tools": tools(config["mcp"]["serviceName"])},
+        )
 
     if method == "tools/call":
         result = call_tool(payload.get("params"))
@@ -1295,6 +1327,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
     .control-card.tool-card {{
       background: #f6f2e9;
+    }}
+    .control-card.identity-card {{
+      background: #f0f9f6;
+      border-color: #b9ddd2;
     }}
     .tool-card .tool-error-section {{
       background: #fbf8ef;
@@ -1887,6 +1923,30 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         <span id="activeGroup" hidden>{escape(active_group)}</span>
         <span id="activeScenario" hidden>{escape(active_scenario)}</span>
         <div class="control-grid">
+          <section class="control-card full identity-card">
+            <div class="card-title">
+              <h2>MCP 기본 정보</h2>
+            </div>
+            <p class="section-hint">
+              FE 검증에서 사용할 MCP 식별자와 PlayMCP 등록 이름을 설정합니다.
+            </p>
+            <div class="field-grid">
+              <label class="field">
+                <span class="field-title">
+                  MCP 식별자
+                  <span class="field-hint">identifyName 검증용으로 initialize의 serverInfo.name에 반환됩니다.</span>
+                </span>
+                <input id="mcpIdentifier" type="text" maxlength="128" autocomplete="off">
+              </label>
+              <label class="field">
+                <span class="field-title">
+                  MCP 이름(서비스 이름)
+                  <span class="field-hint">검증 메시지의 MCP 서버 이름과 동일하게 입력하면 tool description에 포함됩니다.</span>
+                </span>
+                <input id="mcpServiceName" type="text" maxlength="200" autocomplete="off">
+              </label>
+            </div>
+          </section>
           <section class="control-card full server-card">
             <div class="card-title">
               <h2>server 에러 시나리오</h2>
@@ -1940,6 +2000,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           </div>
           <dl class="summary-list">
             <div class="summary-item">
+              <dt>MCP 기본 정보</dt>
+              <dd id="summaryMcpInfo">-</dd>
+            </div>
+            <div class="summary-item">
               <dt>server 에러 시나리오</dt>
               <dd id="summaryServerScenarios">-</dd>
             </div>
@@ -1980,6 +2044,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const toolErrorGrid = document.getElementById("toolErrorGrid");
     const summaryServerScenarios = document.getElementById("summaryServerScenarios");
     const summaryToolScenarios = document.getElementById("summaryToolScenarios");
+    const summaryMcpInfo = document.getElementById("summaryMcpInfo");
+    const mcpIdentifier = document.getElementById("mcpIdentifier");
+    const mcpServiceName = document.getElementById("mcpServiceName");
 
     function clone(value) {{
       return JSON.parse(JSON.stringify(value));
@@ -2004,6 +2071,15 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }} catch (error) {{
         return String(value);
       }}
+    }}
+
+    function escapeHtml(value) {{
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
     }}
 
     function formatHttp(label, response) {{
@@ -2056,6 +2132,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
 
     function setControls(config) {{
+      mcpIdentifier.value = config.mcp.identifier;
+      mcpServiceName.value = config.mcp.serviceName;
       const serverErrors = serverErrorsFromConfig(config);
       document.querySelectorAll('input[name="serverErrors"]').forEach((input) => {{
         input.checked = serverErrors.includes(input.value);
@@ -2072,6 +2150,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       const mode = toolsListModeFromServerErrors(serverErrors);
       const toolErrors = mode === "normal" ? selectedToolErrors() : [];
       return {{
+        mcp: {{
+          identifier: mcpIdentifier.value.trim() || defaultConfig.mcp.identifier,
+          serviceName: mcpServiceName.value.trim() || defaultConfig.mcp.serviceName
+        }},
         server: {{
           httpStatus: serverErrors.includes("auth-403")
             ? 403
@@ -2158,6 +2240,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
 
     function updateConfigSummary(config) {{
+      summaryMcpInfo.innerHTML = [
+        `<span class="summary-chip">식별자: ${{escapeHtml(config.mcp.identifier)}}</span>`,
+        `<span class="summary-chip">MCP 이름: ${{escapeHtml(config.mcp.serviceName)}}</span>`
+      ].join("");
       renderScenarioSummary(summaryServerScenarios, serverErrorsFromConfig(config));
       renderScenarioSummary(
         summaryToolScenarios,
