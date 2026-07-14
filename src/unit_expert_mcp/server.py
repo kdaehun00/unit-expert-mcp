@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import time
@@ -29,6 +31,7 @@ PROTOCOL_VERSION_CHOICES = (
 TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
 DEFAULT_DELAY_SECONDS = 5.0
 PUBLIC_MCP_URL = "https://unit-expert-mcp.onrender.com/mcp"
+CONFIG_QUERY_PARAM = "cfg"
 
 SESSIONS: set[str] = set()
 SCENARIO_LOCK = Lock()
@@ -522,7 +525,7 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
         raise ValueError("server.httpStatus must be 200, 401, or 403")
     config["server"]["httpStatus"] = http_status
 
-    target = str(server.get("target", "initialize"))
+    target = str(server.get("target", config["server"]["target"]))
     if target not in {"initialize", "all"}:
         raise ValueError("server.target must be initialize or all")
     config["server"]["target"] = target
@@ -616,6 +619,45 @@ def resolve_config(raw_header_scenario: str | None) -> dict[str, Any]:
     if raw_header_scenario is not None and raw_header_scenario.strip():
         return scenario_to_config(raw_header_scenario)
     return get_active_config()
+
+
+def encode_config_token(raw_config: Any) -> str:
+    config = compact_config(normalize_config(raw_config))
+    if not config:
+        return ""
+    body = json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
+
+
+def compact_config(config: dict[str, Any]) -> dict[str, Any]:
+    default = default_config()
+
+    def diff(value: Any, default_value: Any) -> Any:
+        if isinstance(value, dict) and isinstance(default_value, dict):
+            result = {
+                key: diff(child_value, default_value.get(key))
+                for key, child_value in value.items()
+                if diff(child_value, default_value.get(key)) is not None
+            }
+            return result or None
+        if value == default_value:
+            return None
+        return value
+
+    return diff(config, default) or {}
+
+
+def decode_config_token(raw_token: str) -> dict[str, Any]:
+    token = raw_token.strip()
+    if not token:
+        raise ValueError("empty config token")
+    padding = "=" * (-len(token) % 4)
+    try:
+        body = base64.urlsafe_b64decode(f"{token}{padding}".encode("ascii"))
+        payload = json.loads(body.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid config token") from error
+    return normalize_config(payload)
 
 
 def valid_tool(
@@ -1132,6 +1174,21 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       border: 1px solid #c8d1df;
       border-radius: 8px;
       padding: 14px;
+      transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }}
+    .endpoint.needs-apply {{
+      background: #fff7ed;
+      border-color: #fdba74;
+    }}
+    .endpoint.url-updated {{
+      background: #ecfdf5;
+      border-color: #86efac;
+      box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.14);
+      animation: urlPulse 900ms ease-out 1;
+    }}
+    @keyframes urlPulse {{
+      0% {{ box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.36); }}
+      100% {{ box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }}
     }}
     .endpoint-label {{
       margin-bottom: 6px;
@@ -1149,6 +1206,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       overflow-wrap: anywhere;
       background: #fff;
       border-color: #e1e6ef;
+    }}
+    .endpoint-hint {{
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 12px;
     }}
     .title-note {{
       margin-top: 6px;
@@ -2061,11 +2123,12 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       </div>
       <aside class="right-column">
         <section class="endpoint" aria-label="MCP URL">
-          <div class="endpoint-label">MCP URL</div>
+          <div class="endpoint-label">테스트용 MCP URL</div>
           <div class="endpoint-row">
             <code id="mcpUrl">{escape(PUBLIC_MCP_URL)}</code>
             <button id="copyMcpUrl" class="copy-button" type="button">복사</button>
           </div>
+          <p id="mcpUrlHint" class="endpoint-hint">설정을 바꾼 뒤 적용을 누르면 이 URL이 갱신됩니다.</p>
         </section>
         <section class="summary-sidebar" aria-label="현재 MCP 설정 요약">
           <div class="summary-header">
@@ -2143,6 +2206,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const preview = document.getElementById("responsePreview");
     const copyMcpUrl = document.getElementById("copyMcpUrl");
     const mcpUrl = document.getElementById("mcpUrl");
+    const endpointCard = document.querySelector(".endpoint");
+    const mcpUrlHint = document.getElementById("mcpUrlHint");
     const applyConfig = document.getElementById("applyConfig");
     const resetConfig = document.getElementById("resetConfig");
     const toolErrorDisabledNote = document.getElementById("toolErrorDisabledNote");
@@ -2151,6 +2216,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const summaryToolScenarios = document.getElementById("summaryToolScenarios");
     const mcpIdentifier = document.getElementById("mcpIdentifier");
     const mcpServiceName = document.getElementById("mcpServiceName");
+    const publicMcpUrl = {json.dumps(PUBLIC_MCP_URL)};
+    const configQueryParam = {json.dumps(CONFIG_QUERY_PARAM)};
+    let appliedConfig = clone(initialConfig);
 
     function clone(value) {{
       return JSON.parse(JSON.stringify(value));
@@ -2174,6 +2242,81 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         return JSON.stringify(value, null, 2);
       }} catch (error) {{
         return String(value);
+      }}
+    }}
+
+    function compactConfig(config) {{
+      function diff(value, defaultValue) {{
+        if (
+          value &&
+          defaultValue &&
+          typeof value === "object" &&
+          typeof defaultValue === "object" &&
+          !Array.isArray(value) &&
+          !Array.isArray(defaultValue)
+        ) {{
+          const result = {{}};
+          Object.entries(value).forEach(([key, childValue]) => {{
+            const childDiff = diff(childValue, defaultValue[key]);
+            if (childDiff !== undefined) result[key] = childDiff;
+          }});
+          return Object.keys(result).length ? result : undefined;
+        }}
+        return JSON.stringify(value) === JSON.stringify(defaultValue) ? undefined : value;
+      }}
+      return diff(config, defaultConfig) || {{}};
+    }}
+
+    function encodeConfig(config) {{
+      const compact = compactConfig(config);
+      if (!Object.keys(compact).length) return "";
+      const json = JSON.stringify(compact);
+      const bytes = new TextEncoder().encode(json);
+      let binary = "";
+      bytes.forEach((byte) => {{
+        binary += String.fromCharCode(byte);
+      }});
+      return btoa(binary)
+        .replace(/\\+/g, "-")
+        .replace(/\\//g, "_")
+        .replace(/=+$/g, "");
+    }}
+
+    function buildMcpUrl(config) {{
+      const url = new URL(publicMcpUrl);
+      const token = encodeConfig(config);
+      if (token) {{
+        url.searchParams.set(configQueryParam, token);
+      }} else {{
+        url.searchParams.delete(configQueryParam);
+      }}
+      return url.toString();
+    }}
+
+    function buildLocalMcpPath(config) {{
+      const token = encodeConfig(config);
+      return token ? `/mcp?${{configQueryParam}}=${{encodeURIComponent(token)}}` : "/mcp";
+    }}
+
+    function markUrlNeedsApply() {{
+      endpointCard.classList.remove("url-updated");
+      endpointCard.classList.add("needs-apply");
+      mcpUrlHint.textContent = "선택값이 바뀌었습니다. 적용을 누르면 테스트용 URL이 갱신됩니다.";
+      copyMcpUrl.textContent = "복사";
+    }}
+
+    function setGeneratedUrl(config, highlight) {{
+      mcpUrl.textContent = buildMcpUrl(config);
+      endpointCard.classList.remove("needs-apply");
+      if (highlight) {{
+        endpointCard.classList.remove("url-updated");
+        void endpointCard.offsetWidth;
+        endpointCard.classList.add("url-updated");
+        mcpUrlHint.textContent = "URL이 갱신됐습니다. 이 URL을 복사해서 FE/Swagger에 넣어주세요.";
+        copyMcpUrl.textContent = "이 URL 복사";
+      }} else {{
+        endpointCard.classList.remove("url-updated");
+        mcpUrlHint.textContent = "이 URL은 현재 설정을 포함합니다. 복사해서 FE/Swagger에 넣으면 같은 응답을 반환합니다.";
       }}
     }}
 
@@ -2299,7 +2442,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     document.getElementById("customHeaderEnabled").addEventListener("change", () => {{
       syncCustomHeaderHint();
-      onConfigChange();
+      handleControlChange();
     }});
 
     function syncEnabledStates(config) {{
@@ -2392,8 +2535,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       updateConfigSummary(config);
     }}
 
-    async function postMcp(payload) {{
-      const response = await fetch("/mcp", {{
+    async function postMcp(payload, config) {{
+      const response = await fetch(buildLocalMcpPath(config), {{
         method: "POST",
         headers: {{
           "Content-Type": "application/json",
@@ -2414,19 +2557,6 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }};
     }}
 
-    async function postConfig(config) {{
-      const response = await fetch("/scenario", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify({{ config }})
-      }});
-      const payload = await response.json();
-      if (!response.ok || !payload.ok) {{
-        throw new Error(pretty({{ status: response.status, body: payload }}));
-      }}
-      return payload.config;
-    }}
-
     async function refreshPreview(config) {{
       const title = activeTitle.textContent;
       const group = activeGroup.textContent;
@@ -2441,13 +2571,13 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
             capabilities: {{}},
             clientInfo: {{ name: "scenario-ui", version: "1.0" }}
           }}
-        }});
+        }}, config);
         const toolsList = await postMcp({{
           jsonrpc: "2.0",
           id: 2,
           method: "tools/list",
           params: {{}}
-        }});
+        }}, config);
         preview.textContent = [
           `$ 구분: ${{group}}`,
           `$ 설정: ${{title}}`,
@@ -2465,15 +2595,14 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     applyConfig.addEventListener("click", async () => {{
       const config = collectConfig();
-      updateSummary(config, false);
-      setButtonBusy(applyConfig, "적용 중");
-      preview.textContent = "$ POST /scenario\\n...";
+      appliedConfig = clone(config);
+      setControls(appliedConfig);
+      updateSummary(appliedConfig, true);
+      setGeneratedUrl(appliedConfig, true);
+      setButtonBusy(applyConfig, "URL 생성 중");
       try {{
-        const appliedConfig = await postConfig(config);
-        setControls(appliedConfig);
-        updateSummary(appliedConfig, true);
-        flashButton(applyConfig, "적용됨", "적용");
         await refreshPreview(appliedConfig);
+        flashButton(applyConfig, "URL 생성됨", "적용");
       }} catch (error) {{
         flashButton(applyConfig, "실패", "적용");
         preview.textContent = error && error.stack ? error.stack : String(error);
@@ -2482,15 +2611,14 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     resetConfig.addEventListener("click", async () => {{
       const config = clone(defaultConfig);
-      setControls(config);
+      appliedConfig = clone(config);
+      setControls(appliedConfig);
+      updateSummary(appliedConfig, true);
+      setGeneratedUrl(appliedConfig, true);
       setButtonBusy(resetConfig, "초기화 중");
-      preview.textContent = "$ POST /scenario\\n...";
       try {{
-        const appliedConfig = await postConfig(config);
-        setControls(appliedConfig);
-        updateSummary(appliedConfig, true);
-        flashButton(resetConfig, "초기화됨", "초기화");
         await refreshPreview(appliedConfig);
+        flashButton(resetConfig, "초기화됨", "초기화");
       }} catch (error) {{
         flashButton(resetConfig, "실패", "초기화");
         preview.textContent = error && error.stack ? error.stack : String(error);
@@ -2504,6 +2632,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       const config = collectConfig();
       syncEnabledStates(config);
       updateSummary(config, false);
+      markUrlNeedsApply();
     }}
 
     document.querySelectorAll("input, select").forEach((input) => {{
@@ -2527,9 +2656,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }}
     }});
 
-    setControls(initialConfig);
-    updateSummary(initialConfig, true);
-    refreshPreview(initialConfig);
+    setControls(appliedConfig);
+    updateSummary(appliedConfig, true);
+    setGeneratedUrl(appliedConfig, false);
+    refreshPreview(appliedConfig);
   </script>
 </body>
 </html>"""
@@ -2558,7 +2688,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, "Not found")
             return
 
-        config = self.request_config()
+        try:
+            config = self.request_config()
+        except ValueError as error:
+            self.send_text(400, str(error))
+            return
         if self.handle_pre_json_rpc_config(config):
             return
 
@@ -2602,7 +2736,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, json_rpc_error(None, -32700, "Parse error"))
             return
 
-        config = self.request_config()
+        try:
+            config = self.request_config()
+        except ValueError as error:
+            self.send_text(400, str(error))
+            return
         if self.handle_pre_json_rpc_config(config, payload.get("method")):
             return
 
@@ -2704,6 +2842,10 @@ class Handler(BaseHTTPRequestHandler):
         return resolve_scenario(self.headers.get(TEST_SCENARIO_HEADER))
 
     def request_config(self) -> dict[str, Any]:
+        query = parse_qs(urlparse(self.path).query)
+        raw_config = query.get(CONFIG_QUERY_PARAM, [""])[0]
+        if raw_config:
+            return decode_config_token(raw_config)
         return resolve_config(self.headers.get(TEST_SCENARIO_HEADER))
 
     def handle_pre_json_rpc_config(

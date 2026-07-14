@@ -6,6 +6,8 @@ from unit_expert_mcp.server import (
     SCENARIO_DESCRIPTIONS,
     SCENARIO_GROUPS,
     SERVER_NAME,
+    decode_config_token,
+    encode_config_token,
     get_active_scenario,
     handle_json_rpc,
     resolve_config,
@@ -284,6 +286,31 @@ class MinimalMcpTest(unittest.TestCase):
             "Unit Expert Local(단위전문가 로컬)",
             payload["result"]["tools"][0]["description"],
         )
+
+    def test_config_token_round_trip_normalizes_custom_url_config(self) -> None:
+        token = encode_config_token(
+            {
+                "mcp": {
+                    "identifier": "unitExpertUrl",
+                    "serviceName": "Unit Expert URL(단위전문가 URL)",
+                },
+                "server": {"httpStatus": 401},
+                "customHeader": {"enabled": True},
+                "toolsList": {"mode": "normal"},
+                "toolErrors": ["invalid-tool-name-char"],
+            }
+        )
+
+        config = decode_config_token(token)
+
+        self.assertEqual(config["mcp"]["identifier"], "unitExpertUrl")
+        self.assertEqual(config["mcp"]["serviceName"], "Unit Expert URL(단위전문가 URL)")
+        self.assertEqual(config["server"]["httpStatus"], 401)
+        self.assertIs(config["customHeader"]["enabled"], True)
+        self.assertEqual(config["toolErrors"], ["invalid-tool-name-char"])
+
+    def test_default_config_token_is_empty_for_short_default_url(self) -> None:
+        self.assertEqual(encode_config_token({}), "")
 
     def test_scenario_groups_cover_every_supported_scenario(self) -> None:
         grouped_scenarios = [
