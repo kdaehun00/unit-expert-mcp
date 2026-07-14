@@ -566,6 +566,11 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
         if tool_error not in tool_errors:
             tool_errors.append(tool_error)
     config["toolErrors"] = tool_errors
+
+    raw_custom_header = raw_config.get("customHeader")
+    if isinstance(raw_custom_header, dict):
+        config["customHeader"]["enabled"] = bool(raw_custom_header.get("enabled", False))
+
     return config
 
 
