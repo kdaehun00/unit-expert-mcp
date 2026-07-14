@@ -1655,6 +1655,80 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       overflow: hidden;
       background: #f7f8fb;
     }}
+    .usage-details {{
+      padding: 0;
+      overflow: hidden;
+      background: #eef7f4;
+      border-color: #b8d9d0;
+    }}
+    .usage-details .usage-body {{
+      display: grid;
+      gap: 14px;
+      padding: 16px;
+      border-top: 1px solid #c7e2da;
+    }}
+    .usage-details .usage-steps {{
+      margin: 0;
+      padding-left: 20px;
+      color: var(--text);
+      font-size: 14px;
+    }}
+    .usage-details .usage-steps li + li {{
+      margin-top: 7px;
+    }}
+    .usage-details .usage-note {{
+      margin: 0;
+      padding: 10px 11px;
+      border: 1px solid #bdded4;
+      border-radius: 6px;
+      background: #f8fffc;
+      color: #245a4c;
+      font-size: 13px;
+      line-height: 1.55;
+    }}
+    .usage-details .usage-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    .usage-details .usage-box {{
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      padding: 10px 11px;
+      border: 1px solid #d7e6e2;
+      border-radius: 6px;
+      background: #fff;
+    }}
+    .usage-details .usage-box strong {{
+      font-size: 13px;
+    }}
+    .usage-details .usage-box p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }}
+    .usage-toggle-label {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid #aacfc5;
+      border-radius: 999px;
+      color: #245a4c;
+      background: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .usage-toggle-label::before {{
+      content: "펼쳐보기";
+    }}
+    .usage-details[open] .usage-toggle-label::before {{
+      content: "접기";
+    }}
     .policy-details summary {{
       display: flex;
       align-items: center;
@@ -1687,6 +1761,26 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       font-weight: 500;
       text-align: right;
       overflow-wrap: anywhere;
+    }}
+    .policy-toggle-label {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid #c7d0dd;
+      border-radius: 999px;
+      color: #475569;
+      background: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .policy-toggle-label::before {{
+      content: "펼쳐보기";
+    }}
+    .policy-details[open] .policy-toggle-label::before {{
+      content: "접기";
     }}
     .policy-details .policy-reference {{
       padding: 16px;
@@ -2079,6 +2173,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       .field-grid, .field-grid.three {{ grid-template-columns: 1fr; }}
       .check-grid.two-column {{ grid-template-columns: 1fr; }}
       .policy-grid {{ grid-template-columns: 1fr; }}
+      .usage-details .usage-grid {{ grid-template-columns: 1fr; }}
       .inline-field {{ grid-template-columns: 1fr; }}
       .terminal {{ min-height: 360px; }}
       .terminal pre {{ min-height: 314px; }}
@@ -2102,6 +2197,23 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         <span id="activeGroup" hidden>{escape(active_group)}</span>
         <span id="activeScenario" hidden>{escape(active_scenario)}</span>
         <div class="control-grid">
+          <details class="control-card full policy-details usage-details">
+            <summary>
+              <h2>사용 설명서</h2>
+              <span class="usage-toggle-label" aria-hidden="true"></span>
+            </summary>
+            <div class="usage-body">
+              <ol class="usage-steps">
+                <li>필요한 경우 왼쪽 <strong>MCP 식별자</strong>, <strong>MCP 이름(서비스 이름)</strong>, <strong>커스텀 헤더 설정 여부</strong>를 변경합니다.</li>
+                <li>테스트할 에러 시나리오를 선택합니다.</li>
+                <li><strong>적용</strong> 버튼을 누릅니다. (이는 서버 상태를 바꾸는 것이 아니라, 현재 설정이 포함된 테스트용 MCP URL을 생성합니다.)</li>
+                <li>좌측 상단의 <strong>테스트용 MCP URL</strong>의 <strong>복사</strong> 버튼을 눌러 FE/Swagger의 MCP URL로 사용합니다.</li>
+              </ol>
+              <p class="usage-note">
+                시나리오별 자세한 설명은 페이지 하단에 작성되어 있습니다.
+              </p>
+            </div>
+          </details>
           <section class="control-card full server-card">
             <div class="card-title">
               <h2>server 에러 시나리오</h2>
@@ -2129,7 +2241,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           <details class="control-card full policy-details">
             <summary>
               <h2>시나리오별 설명</h2>
-              <span class="policy-summary-context">각 시나리오가 어떤 응답을 만드는지 확인합니다.</span>
+              <span class="policy-toggle-label" aria-hidden="true"></span>
             </summary>
             <div class="policy-reference" id="scenarioRows">
               {policy_reference}
@@ -2627,36 +2739,24 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }}
     }}
 
-    applyConfig.addEventListener("click", async () => {{
+    applyConfig.addEventListener("click", () => {{
       const config = collectConfig();
       appliedConfig = clone(config);
       setControls(appliedConfig);
       updateSummary(appliedConfig, true);
       setGeneratedUrl(appliedConfig, true);
-      setButtonBusy(applyConfig, "URL 생성 중");
-      try {{
-        await refreshPreview(appliedConfig);
-        flashButton(applyConfig, "URL 생성됨", "적용");
-      }} catch (error) {{
-        flashButton(applyConfig, "실패", "적용");
-        preview.textContent = error && error.stack ? error.stack : String(error);
-      }}
+      flashButton(applyConfig, "URL 생성됨", "적용");
+      refreshPreview(appliedConfig);
     }});
 
-    resetConfig.addEventListener("click", async () => {{
+    resetConfig.addEventListener("click", () => {{
       const config = clone(defaultConfig);
       appliedConfig = clone(config);
       setControls(appliedConfig);
       updateSummary(appliedConfig, true);
       setGeneratedUrl(appliedConfig, true);
-      setButtonBusy(resetConfig, "초기화 중");
-      try {{
-        await refreshPreview(appliedConfig);
-        flashButton(resetConfig, "초기화됨", "초기화");
-      }} catch (error) {{
-        flashButton(resetConfig, "실패", "초기화");
-        preview.textContent = error && error.stack ? error.stack : String(error);
-      }}
+      flashButton(resetConfig, "초기화됨", "초기화");
+      refreshPreview(appliedConfig);
     }});
 
     function handleControlChange(event) {{
