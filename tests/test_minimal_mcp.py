@@ -177,8 +177,8 @@ class MinimalMcpTest(unittest.TestCase):
                 "protocolVersionEnabled": True,
                 "protocolVersion": "2024-11-05",
             },
-            "toolsList": {"mode": "normal"},
-            "toolErrors": ["duplicate-tool-name", "missing-description"],
+            "toolsList": {"mode": "normal", "duplicateToolName": True},
+            "toolErrors": ["missing-description"],
         }
 
         status, _, payload = handle_json_rpc(
@@ -216,6 +216,56 @@ class MinimalMcpTest(unittest.TestCase):
         listed_tools = payload["result"]["tools"]
         self.assertEqual([tool.get("name") for tool in listed_tools[:2]], ["search_place", "search_place"])
         self.assertNotIn("description", listed_tools[2])
+
+    def test_non_normal_tools_list_mode_ignores_duplicate_tool_name(self) -> None:
+        config = {
+            "toolsList": {
+                "mode": "empty",
+                "duplicateToolName": True,
+            }
+        }
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            config=config,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["result"]["tools"], [])
+
+    def test_too_many_tools_can_include_duplicate_tool_name(self) -> None:
+        config = {
+            "toolsList": {
+                "mode": "too-many",
+                "tooManyCount": 21,
+                "duplicateToolName": True,
+            }
+        }
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            config=config,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        listed_tools = payload["result"]["tools"]
+        names = [tool["name"] for tool in listed_tools]
+        self.assertEqual(len(listed_tools), 21)
+        self.assertEqual(names[:2], ["tool_0", "tool_0"])
 
     def test_active_custom_config_can_return_many_tools(self) -> None:
         set_active_config(

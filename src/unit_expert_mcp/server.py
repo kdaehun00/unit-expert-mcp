@@ -95,6 +95,7 @@ SCENARIO_GROUPS = (
             "tools-list-error",
             "tools-list-null",
             "tools-list-empty",
+            "duplicate-tool-name",
             "too-many-tools",
             "delayed-response",
         ),
@@ -102,7 +103,6 @@ SCENARIO_GROUPS = (
     (
         "tool error",
         (
-            "duplicate-tool-name",
             "invalid-tool-name-char",
             "invalid-tool-name-length",
             "missing-name",
@@ -144,10 +144,16 @@ SERVER_ERROR_GROUPS = (
             "too-many-tools",
         ),
     ),
+    (
+        "tools/list 도구 구성",
+        "정상 tools 반환일 때 선택 가능",
+        (
+            "duplicate-tool-name",
+        ),
+    ),
 )
 
 TOOL_ERROR_SCENARIOS = (
-    "duplicate-tool-name",
     "invalid-tool-name-char",
     "invalid-tool-name-length",
     "missing-name",
@@ -165,7 +171,6 @@ TOOL_ERROR_GROUPS = (
         "툴 이름 조건",
         "복수 선택 가능",
         (
-            "duplicate-tool-name",
             "invalid-tool-name-char",
             "invalid-tool-name-length",
             "forbidden-kakao-name",
@@ -229,6 +234,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "toolsList": {
         "mode": "normal",
         "tooManyCount": 21,
+        "duplicateToolName": False,
     },
     "toolErrors": [],
 }
@@ -490,6 +496,9 @@ def scenario_to_config(raw_scenario: str | None) -> dict[str, Any]:
     if scenario == "too-many-tools":
         config["toolsList"]["mode"] = "too-many"
         return config
+    if scenario == "duplicate-tool-name":
+        config["toolsList"]["duplicateToolName"] = True
+        return config
     if scenario in TOOL_ERROR_SCENARIOS:
         config["toolErrors"] = [scenario]
         return config
@@ -558,6 +567,9 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
     if too_many_count < 1 or too_many_count > 100:
         raise ValueError("toolsList.tooManyCount must be between 1 and 100")
     config["toolsList"]["tooManyCount"] = too_many_count
+    config["toolsList"]["duplicateToolName"] = (
+        mode in {"normal", "too-many"} and bool(tools_list.get("duplicateToolName", False))
+    )
 
     raw_tool_errors = raw_config.get("toolErrors", [])
     if not isinstance(raw_tool_errors, list):
@@ -777,16 +789,20 @@ def tools_for_config(config: dict[str, Any]) -> dict[str, Any] | None:
     if mode == "empty":
         return {"tools": []}
     if mode == "too-many":
-        return {
-            "tools": [
-                valid_tool(f"tool_{index}", service_name=service_name)
-                for index in range(tools_list["tooManyCount"])
-            ]
-        }
+        count = tools_list["tooManyCount"]
+        generated_tools = [
+            valid_tool(f"tool_{index}", service_name=service_name)
+            for index in range(count)
+        ]
+        if tools_list.get("duplicateToolName") and count >= 2:
+            generated_tools[1] = valid_tool("tool_0", service_name=service_name)
+        return {"tools": generated_tools}
     if mode != "normal":
         return None
 
     configured_tools: list[dict[str, Any]] = []
+    if tools_list.get("duplicateToolName"):
+        configured_tools.extend(mutated_tool_for_error("duplicate-tool-name", service_name))
     for tool_error in config["toolErrors"]:
         configured_tools.extend(mutated_tool_for_error(tool_error, service_name))
     if configured_tools:
@@ -2375,6 +2391,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       if (modeToScenario[config.toolsList.mode]) {{
         scenarios.push(modeToScenario[config.toolsList.mode]);
       }}
+      if (config.toolsList.duplicateToolName) scenarios.push("duplicate-tool-name");
       return scenarios;
     }}
 
@@ -2400,6 +2417,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     function collectConfig() {{
       const serverErrors = selectedServerErrors();
       const mode = toolsListModeFromServerErrors(serverErrors);
+      const duplicateToolName =
+        ["normal", "too-many"].includes(mode) && serverErrors.includes("duplicate-tool-name");
       const toolErrors = mode === "normal" ? selectedToolErrors() : [];
       return {{
         mcp: {{
@@ -2424,7 +2443,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         }},
         toolsList: {{
           mode,
-          tooManyCount: 21
+          tooManyCount: 21,
+          duplicateToolName
         }},
         customHeader: {{
           enabled: document.getElementById("customHeaderEnabled").checked,
@@ -2447,6 +2467,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     function syncEnabledStates(config) {{
       const toolErrorsEnabled = config.toolsList.mode === "normal";
+      const duplicateToolEnabled = ["normal", "too-many"].includes(config.toolsList.mode);
       toolErrorDisabledNote.classList.toggle("visible", !toolErrorsEnabled);
       toolErrorGrid.classList.toggle("is-disabled", !toolErrorsEnabled);
       document.querySelectorAll('input[name="toolErrors"]').forEach((input) => {{
@@ -2455,6 +2476,15 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           input.checked = false;
         }}
       }});
+      const duplicateToolInput = document.querySelector(
+        'input[name="serverErrors"][value="duplicate-tool-name"]'
+      );
+      if (duplicateToolInput) {{
+        duplicateToolInput.disabled = !duplicateToolEnabled;
+        if (!duplicateToolEnabled) {{
+          duplicateToolInput.checked = false;
+        }}
+      }}
     }}
 
     function enforceExclusiveScenario(input) {{
@@ -2500,6 +2530,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         }};
         parts.push(labels[config.toolsList.mode] || config.toolsList.mode);
       }}
+      if (config.toolsList.duplicateToolName) {{
+        parts.push(titleForToolError("duplicate-tool-name"));
+      }}
       for (const error of config.toolErrors) {{
         parts.push(titleForToolError(error));
       }}
@@ -2519,7 +2552,8 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         config.server.httpStatus !== 200 ||
         config.server.delayEnabled ||
         config.initialize.protocolVersion !== "2025-03-26" ||
-        config.toolsList.mode !== "normal";
+        config.toolsList.mode !== "normal" ||
+        config.toolsList.duplicateToolName;
       const hasToolError = config.toolErrors.length > 0;
       const group = hasServerError && hasToolError
         ? "서버 error + tool error"
