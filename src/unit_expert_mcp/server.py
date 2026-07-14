@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 SERVER_NAME = "unitExpert"
 SERVER_VERSION = "1.0.0"
 SERVICE_NAME = "Unit Expert(단위전문가)"
-SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
+SUPPORTED_PROTOCOL_VERSIONS = ("2024-03-26", "2025-03-26", "2025-06-18", "2025-11-25")
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 PROTOCOL_VERSION_CHOICES = (
     ("2024-03-26", "2024-03-26 (스펙에 아예 없는 버전)"),
@@ -213,6 +213,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "target": "all",
         "delayEnabled": False,
         "delaySeconds": DEFAULT_DELAY_SECONDS,
+    },
+    "customHeader": {
+        "enabled": False,
+        "name": "X-Mock-Auth",
+        "value": "allow",
     },
     "initialize": {
         "protocolVersionEnabled": True,
@@ -1415,6 +1420,97 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       color: var(--muted);
       font-size: 13px;
     }}
+    .sidebar-mcp-fields {{
+      display: grid;
+      gap: 14px;
+      padding: 14px 0;
+      border-top: 1px solid #c8d1df;
+      border-bottom: 1px solid #c8d1df;
+      margin-bottom: 14px;
+    }}
+    .sidebar-custom-header-row {{
+      display: grid;
+      gap: 8px;
+    }}
+    .sidebar-custom-header-label {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }}
+    .custom-header-hint .hint-desc {{
+      margin: 6px 0 0;
+      color: #335c85;
+      font-size: 12px;
+      line-height: 1.6;
+      grid-column: 1 / -1;
+    }}
+    .custom-header-card .card-title {{
+      justify-content: space-between;
+    }}
+    .custom-header-toggle {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }}
+    .custom-header-toggle input[type="checkbox"] {{
+      position: absolute;
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }}
+    .toggle-track {{
+      display: inline-flex;
+      align-items: center;
+      width: 40px;
+      height: 22px;
+      border-radius: 999px;
+      background: var(--line);
+      transition: background 0.2s;
+      cursor: pointer;
+      flex-shrink: 0;
+    }}
+    .toggle-thumb {{
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #fff;
+      margin-left: 3px;
+      transition: transform 0.2s;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }}
+    .custom-header-toggle input:checked + .toggle-track {{
+      background: var(--accent);
+    }}
+    .custom-header-toggle input:checked + .toggle-track .toggle-thumb {{
+      transform: translateX(18px);
+    }}
+    .custom-header-hint {{
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 6px 10px;
+      margin-top: 4px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: #edf6ff;
+      border: 1px solid #c2ddf7;
+    }}
+    .custom-header-hint .hint-label {{
+      color: #335c85;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }}
+    .custom-header-hint code {{
+      font-family: monospace;
+      font-size: 13px;
+      background: #d6eaff;
+      color: #1a4a7a;
+      padding: 3px 8px;
+      border-radius: 5px;
+      letter-spacing: 0.02em;
+    }}
     .check-grid {{
       display: grid;
       gap: 14px;
@@ -1923,30 +2019,6 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         <span id="activeGroup" hidden>{escape(active_group)}</span>
         <span id="activeScenario" hidden>{escape(active_scenario)}</span>
         <div class="control-grid">
-          <section class="control-card full identity-card">
-            <div class="card-title">
-              <h2>MCP 기본 정보</h2>
-            </div>
-            <p class="section-hint">
-              FE 검증에서 사용할 MCP 식별자와 PlayMCP 등록 이름을 설정합니다.
-            </p>
-            <div class="field-grid">
-              <label class="field">
-                <span class="field-title">
-                  MCP 식별자
-                  <span class="field-hint">identifyName 검증용으로 initialize의 serverInfo.name에 반환됩니다.</span>
-                </span>
-                <input id="mcpIdentifier" type="text" maxlength="128" autocomplete="off">
-              </label>
-              <label class="field">
-                <span class="field-title">
-                  MCP 이름(서비스 이름)
-                  <span class="field-hint">검증 메시지의 MCP 서버 이름과 동일하게 입력하면 tool description에 포함됩니다.</span>
-                </span>
-                <input id="mcpServiceName" type="text" maxlength="200" autocomplete="off">
-              </label>
-            </div>
-          </section>
           <section class="control-card full server-card">
             <div class="card-title">
               <h2>server 에러 시나리오</h2>
@@ -1992,17 +2064,45 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         </section>
         <section class="summary-sidebar" aria-label="현재 MCP 설정 요약">
           <div class="summary-header">
-            <h2>현재 설정</h2>
+            <h2>MCP 설정</h2>
             <div class="action-buttons">
               <button id="applyConfig" type="button">적용</button>
               <button id="resetConfig" class="secondary" type="button">초기화</button>
             </div>
           </div>
-          <dl class="summary-list">
-            <div class="summary-item">
-              <dt>MCP 기본 정보</dt>
-              <dd id="summaryMcpInfo">-</dd>
+          <div class="sidebar-mcp-fields">
+            <div class="field-grid">
+              <label class="field">
+                <span class="field-title">
+                  MCP 식별자
+                  <span class="field-hint">initialize의 serverInfo.name에 반환됩니다.</span>
+                </span>
+                <input id="mcpIdentifier" type="text" maxlength="128" autocomplete="off">
+              </label>
+              <label class="field">
+                <span class="field-title">
+                  MCP 이름(서비스 이름)
+                  <span class="field-hint">tool description에 포함됩니다.</span>
+                </span>
+                <input id="mcpServiceName" type="text" maxlength="200" autocomplete="off">
+              </label>
             </div>
+            <div class="sidebar-custom-header-row">
+              <div class="sidebar-custom-header-label">
+                <span class="field-title">커스텀 헤더 설정 여부</span>
+                <label class="custom-header-toggle">
+                  <input type="checkbox" id="customHeaderEnabled">
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                </label>
+              </div>
+              <div id="customHeaderHint" class="custom-header-hint" hidden>
+                <span class="hint-label">요청 헤더</span>
+                <code>X-Mock-Auth: allow</code>
+                <p class="hint-desc">에러 시나리오와 별개로 동작합니다. 헤더가 없으면 401, 값이 틀리면 403을 반환합니다.</p>
+              </div>
+            </div>
+          </div>
+          <dl class="summary-list">
             <div class="summary-item">
               <dt>server 에러 시나리오</dt>
               <dd id="summaryServerScenarios">-</dd>
@@ -2044,7 +2144,6 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const toolErrorGrid = document.getElementById("toolErrorGrid");
     const summaryServerScenarios = document.getElementById("summaryServerScenarios");
     const summaryToolScenarios = document.getElementById("summaryToolScenarios");
-    const summaryMcpInfo = document.getElementById("summaryMcpInfo");
     const mcpIdentifier = document.getElementById("mcpIdentifier");
     const mcpServiceName = document.getElementById("mcpServiceName");
 
@@ -2141,6 +2240,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       document.querySelectorAll('input[name="toolErrors"]').forEach((input) => {{
         input.checked = config.toolErrors.includes(input.value);
       }});
+      const customHeaderEl = document.getElementById("customHeaderEnabled");
+      if (customHeaderEl) {{
+        customHeaderEl.checked = !!(config.customHeader && config.customHeader.enabled);
+        syncCustomHeaderHint();
+      }}
       syncEnabledStates(config);
       updateSummary(config, false);
     }}
@@ -2174,9 +2278,24 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           mode,
           tooManyCount: 21
         }},
+        customHeader: {{
+          enabled: document.getElementById("customHeaderEnabled").checked,
+          name: "X-Mock-Auth",
+          value: "allow"
+        }},
         toolErrors
       }};
     }}
+
+    function syncCustomHeaderHint() {{
+      const enabled = document.getElementById("customHeaderEnabled").checked;
+      document.getElementById("customHeaderHint").hidden = !enabled;
+    }}
+
+    document.getElementById("customHeaderEnabled").addEventListener("change", () => {{
+      syncCustomHeaderHint();
+      onConfigChange();
+    }});
 
     function syncEnabledStates(config) {{
       const toolErrorsEnabled = config.toolsList.mode === "normal";
@@ -2240,10 +2359,6 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     }}
 
     function updateConfigSummary(config) {{
-      summaryMcpInfo.innerHTML = [
-        `<span class="summary-chip">식별자: ${{escapeHtml(config.mcp.identifier)}}</span>`,
-        `<span class="summary-chip">MCP 이름: ${{escapeHtml(config.mcp.serviceName)}}</span>`
-      ].join("");
       renderScenarioSummary(summaryServerScenarios, serverErrorsFromConfig(config));
       renderScenarioSummary(
         summaryToolScenarios,
@@ -2594,6 +2709,17 @@ class Handler(BaseHTTPRequestHandler):
         server = config["server"]
         if server["delayEnabled"]:
             time.sleep(server["delaySeconds"])
+
+        custom_header = config.get("customHeader", {})
+        if custom_header.get("enabled"):
+            header_val = self.headers.get(custom_header.get("name", ""))
+            if header_val is None:
+                self.send_text(401, "Unauthorized")
+                return True
+            if header_val != custom_header.get("value", ""):
+                self.send_text(403, "Forbidden")
+                return True
+            return False
 
         http_status = server["httpStatus"]
         target = server["target"]
