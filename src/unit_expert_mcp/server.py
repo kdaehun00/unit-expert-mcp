@@ -2440,7 +2440,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         endpointCard.classList.remove("url-updated");
         void endpointCard.offsetWidth;
         endpointCard.classList.add("url-updated");
-        mcpUrlHint.textContent = "URL이 갱신됐습니다. 이 URL을 복사해서 FE/Swagger에 넣어주세요.";
+        mcpUrlHint.textContent = "URL이 갱신됐습니다. 이 URL을 복사해서 FE/Swagger내 Endpoint URL 필드에 넣어주세요.";
         copyMcpUrl.textContent = "이 URL 복사";
       }} else {{
         endpointCard.classList.remove("url-updated");
