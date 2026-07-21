@@ -337,6 +337,33 @@ class MinimalMcpTest(unittest.TestCase):
             payload["result"]["tools"][0]["description"],
         )
 
+    def test_long_description_scenario_keeps_service_name_in_description(self) -> None:
+        service_name = "아린테스트"
+        config = {
+            "mcp": {
+                "identifier": "Arintest",
+                "serviceName": service_name,
+            },
+            "toolErrors": ["long-description"],
+        }
+
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            config=config,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        description = payload["result"]["tools"][0]["description"]
+        self.assertIn(service_name, description)
+        self.assertGreater(len(description), 1024)
+
     def test_config_token_round_trip_normalizes_custom_url_config(self) -> None:
         token = encode_config_token(
             {

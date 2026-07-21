@@ -505,6 +505,11 @@ def scenario_to_config(raw_scenario: str | None) -> dict[str, Any]:
     return config
 
 
+def long_description(service_name: str = SERVICE_NAME) -> str:
+    prefix = f"{service_name} "
+    return prefix + ("a" * (1051 - len(prefix)))
+
+
 def normalize_config(raw_config: Any) -> dict[str, Any]:
     if not isinstance(raw_config, dict):
         return default_config()
@@ -725,7 +730,7 @@ def tools_for_scenario(scenario: str) -> dict[str, Any] | None:
         case "forbidden-kakao-name":
             return {"tools": [valid_tool("kakao_search")]}
         case "long-description":
-            return {"tools": [valid_tool("search_place", "a" * 1051)]}
+            return {"tools": [valid_tool("search_place", long_description())]}
         case "missing-service-name-in-description":
             return {"tools": [valid_tool("search_place", "Search places nearby.")]}
         case "incomplete-annotations":
@@ -766,7 +771,13 @@ def mutated_tool_for_error(tool_error: str, service_name: str = SERVICE_NAME) ->
     if tool_error == "forbidden-kakao-name":
         return [valid_tool("kakao_search", service_name=service_name)]
     if tool_error == "long-description":
-        return [valid_tool("long_description_case", "a" * 1051, service_name=service_name)]
+        return [
+            valid_tool(
+                "long_description_case",
+                long_description(service_name),
+                service_name=service_name,
+            )
+        ]
     if tool_error == "missing-service-name-in-description":
         return [valid_tool("missing_service_name_case", "Search places nearby.", service_name=service_name)]
     if tool_error == "incomplete-annotations":
@@ -2204,13 +2215,14 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
             </summary>
             <div class="usage-body">
               <ol class="usage-steps">
-                <li>필요한 경우 왼쪽 <strong>MCP 식별자</strong>, <strong>MCP 이름(서비스 이름)</strong>, <strong>커스텀 헤더 설정 여부</strong>를 변경합니다.</li>
-                <li>테스트할 에러 시나리오를 선택합니다.</li>
-                <li><strong>적용</strong> 버튼을 누릅니다. (이는 서버 상태를 바꾸는 것이 아니라, 현재 설정이 포함된 테스트용 MCP URL을 생성합니다.)</li>
-                <li>좌측 상단의 <strong>테스트용 MCP URL</strong>의 <strong>복사</strong> 버튼을 눌러 FE/Swagger의 MCP URL로 사용합니다.</li>
+                <li><strong>MCP 상태 제어 페이지</strong>에 접속합니다.</li>
+                <li>테스트할 MCP의 <strong>MCP 식별자</strong>와 <strong>MCP 이름(서비스 이름)</strong>으로 변경합니다. 필요한 경우 <strong>커스텀 헤더 설정 여부</strong>도 설정합니다.</li>
+                <li>원하는 시나리오를 선택한 뒤 <strong>적용</strong> 버튼을 누릅니다.</li>
+                <li>좌측 상단의 <strong>테스트용 MCP URL</strong> 옆 <strong>복사</strong> 버튼을 누릅니다.</li>
+                <li>복사된 URL을 MCP 등록/수정 요청의 <strong>endpoint URL</strong> 값에 넣고 검증합니다.</li>
               </ol>
               <p class="usage-note">
-                시나리오별 자세한 설명은 페이지 하단에 작성되어 있습니다.
+                적용 버튼은 서버 상태를 바꾸는 것이 아니라, 현재 설정이 포함된 테스트용 MCP URL을 생성합니다.
               </p>
             </div>
           </details>
