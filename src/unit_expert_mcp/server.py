@@ -1404,6 +1404,8 @@ _INSPECT_PAGE = """<!doctype html>
       border: 1px solid #33415c; border-radius: 8px; padding: 7px 10px; min-width: 90px;
     }
     .console input.val { width: 90px; }
+    .console .url-field { flex: 1; min-width: 320px; }
+    .console .url-field input { width: 100%; }
     .send-btn { background: #0e766e; color: #eafffb; border-color: #0e766e; font-weight: 700; padding: 8px 20px; }
     .send-btn:hover { background: #109c91; }
     .send-btn:disabled { opacity: 0.5; cursor: default; }
@@ -1436,7 +1438,13 @@ _INSPECT_PAGE = """<!doctype html>
   <main>
     <div class="console">
       <h2>▶ 요청 보내기</h2>
-      <p class="hint">이 페이지의 /mcp로 2026-07-28 요청을 직접 조립해서 보냅니다. (브라우저 fetch — SDK와 동일한 wire)</p>
+      <p class="hint">MCP 요청을 직접 조립해서 보냅니다. (브라우저 fetch — SDK와 동일한 wire) 대상 URL을 시나리오 URL(<code>?cfg=…</code>)로 바꾸면 그 설정으로 응답합니다.</p>
+      <div class="console-row">
+        <div class="field-c url-field">
+          <label>대상 URL</label>
+          <input id="cUrl" type="text" value="/mcp" spellcheck="false" placeholder="/mcp 또는 http://.../mcp?cfg=…">
+        </div>
+      </div>
       <div class="console-row">
         <div class="field-c">
           <label>메서드</label>
@@ -1514,6 +1522,7 @@ _INSPECT_PAGE = """<!doctype html>
     const cTo = document.getElementById("cTo");
     const hdrBox = document.getElementById("hdrBox");
     const bodyBox = document.getElementById("bodyBox");
+    const cUrl = document.getElementById("cUrl");
 
     CONVERT_TOOLS.forEach((name) => {
       const opt = document.createElement("option");
@@ -1594,17 +1603,26 @@ _INSPECT_PAGE = """<!doctype html>
       // Send whatever is in the boxes, verbatim — no correction, no validation.
       const headers = parseHeaders(hdrBox.value);
       const rawBody = bodyBox.value;
+      const target = cUrl.value.trim() || "/mcp";
+      // The inspect log only captures requests to *this* server. A same-origin
+      // path (/mcp, /mcp?cfg=…) is logged; a cross-origin absolute URL is sent
+      // but won't appear below (and may be blocked by CORS).
+      const sameOrigin = target.startsWith("/") ||
+        target.startsWith(location.origin);
       sendBtn.disabled = true;
       const prev = sendBtn.textContent;
       sendBtn.textContent = "전송 중…";
       callNote.textContent = "";
       try {
-        const res = await fetch("/mcp", { method: "POST", headers, body: rawBody });
-        callNote.textContent = `HTTP ${res.status} · 아래 로그 최상단에 기록됨`;
+        const res = await fetch(target, { method: "POST", headers, body: rawBody });
+        callNote.textContent = sameOrigin
+          ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨`
+          : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다`;
         lastSignature = "";        // force re-render on next poll
         poll();
       } catch (e) {
-        callNote.textContent = "요청 실패: " + (e && e.message ? e.message : e);
+        callNote.textContent = "요청 실패: " + (e && e.message ? e.message : e) +
+          " (외부 URL이면 CORS 차단일 수 있음)";
       } finally {
         sendBtn.disabled = false;
         sendBtn.textContent = prev;
@@ -2905,6 +2923,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       text-align: right;
     }}
     body[data-era="2026"] .era-2025-only {{
+      display: none !important;
+    }}
+    /* 2026 전용 컨트롤은 2025 탭에서 숨긴다. */
+    body:not([data-era="2026"]) .era-2026-only {{
       display: none !important;
     }}
     body[data-era="2026"] .era-2026-badge {{
