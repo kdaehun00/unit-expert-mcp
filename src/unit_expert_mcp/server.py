@@ -3049,6 +3049,23 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
                 <p class="hint-desc">에러 시나리오와 별개로 동작합니다. 헤더가 없으면 401, 값이 틀리면 403을 반환합니다.</p>
               </div>
             </div>
+            <div class="sidebar-custom-header-row era-2026-only" id="rejectLegacyRow">
+              <div class="sidebar-custom-header-label">
+                <span class="field-title">
+                  지원 프로토콜 버전 2026-07-28로 고정
+                  <span class="field-hint">이 버전만 지원합니다. 구버전(2025 이하) initialize 핸드셰이크 요청은 -32022로 거부됩니다.</span>
+                </span>
+                <label class="custom-header-toggle">
+                  <input type="checkbox" id="rejectLegacyEnabled">
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                </label>
+              </div>
+              <div id="rejectLegacyHint" class="custom-header-hint" hidden>
+                <span class="hint-label">동작</span>
+                <code>-32022 UnsupportedProtocolVersion</code>
+                <p class="hint-desc">2026 전송 마커(_meta·Mcp-Method)가 없는 요청은 모두 거부됩니다. 최신 버전을 아직 지원하지 않는 클라이언트가 실제로 실패하는지 확인할 때 사용합니다.</p>
+              </div>
+            </div>
           </div>
           <dl class="summary-list">
             <div class="summary-item">
@@ -3285,6 +3302,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         customHeaderEl.checked = !!(config.customHeader && config.customHeader.enabled);
         syncCustomHeaderHint();
       }}
+      const rejectLegacyEl = document.getElementById("rejectLegacyEnabled");
+      if (rejectLegacyEl) {{
+        rejectLegacyEl.checked = !!config.rejectLegacy;
+        syncRejectLegacyHint();
+      }}
       syncEnabledStates(config);
       updateSummary(config, false);
     }}
@@ -3297,6 +3319,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       const toolErrors = mode === "normal" ? selectedToolErrors() : [];
       return {{
         protocolEra: currentEra,
+        rejectLegacy: currentEra === "2026" && document.getElementById("rejectLegacyEnabled").checked,
         mcp: {{
           identifier: mcpIdentifier.value.trim() || defaultConfig.mcp.identifier,
           serviceName: mcpServiceName.value.trim() || defaultConfig.mcp.serviceName
@@ -3338,6 +3361,16 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     document.getElementById("customHeaderEnabled").addEventListener("change", () => {{
       syncCustomHeaderHint();
+      handleControlChange();
+    }});
+
+    function syncRejectLegacyHint() {{
+      const enabled = document.getElementById("rejectLegacyEnabled").checked;
+      document.getElementById("rejectLegacyHint").hidden = !enabled;
+    }}
+
+    document.getElementById("rejectLegacyEnabled").addEventListener("change", () => {{
+      syncRejectLegacyHint();
       handleControlChange();
     }});
 
@@ -3570,6 +3603,12 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         document.querySelectorAll(".era-2025-only input[type=checkbox]").forEach((input) => {{
           input.checked = false;
         }});
+      }} else {{
+        // Symmetrically, clear 2026-only toggles when returning to 2025.
+        document.querySelectorAll(".era-2026-only input[type=checkbox]").forEach((input) => {{
+          input.checked = false;
+        }});
+        syncRejectLegacyHint();
       }}
       if (opts.silent) return;
       // Switching era invalidates 2025-only selections; recollect and re-apply.
