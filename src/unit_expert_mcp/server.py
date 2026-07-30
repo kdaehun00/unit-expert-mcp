@@ -8,6 +8,8 @@ import json
 import os
 import time
 import uuid
+from collections import deque
+from datetime import datetime, timezone
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,8 +21,27 @@ from urllib.parse import parse_qs, urlparse
 SERVER_NAME = "unitExpert"
 SERVER_VERSION = "1.0.0"
 SERVICE_NAME = "Unit Expert(단위전문가)"
-SUPPORTED_PROTOCOL_VERSIONS = ("2024-03-26", "2025-03-26", "2025-06-18", "2025-11-25")
-LATEST_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_PROTOCOL_VERSIONS = ("2024-03-26", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28")
+LATEST_PROTOCOL_VERSION = "2026-07-28"
+
+# 2026-07-28 stateless protocol constants.
+PROTOCOL_VERSION_2026 = "2026-07-28"
+# Per-request _meta envelope keys (spec: basic/index#meta).
+META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
+META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+# MCP-defined JSON-RPC error codes introduced in 2026-07-28.
+ERR_HEADER_MISMATCH = -32020
+ERR_MISSING_CAPABILITY = -32021
+ERR_UNSUPPORTED_VERSION = -32022
+ERR_INVALID_PARAMS = -32602
+# method -> params key mirrored into the Mcp-Name header.
+NAME_BEARING_METHODS = {
+    "tools/call": "name",
+    "resources/read": "uri",
+    "prompts/get": "name",
+}
 PROTOCOL_VERSION_CHOICES = (
     ("2024-03-26", "2024-03-26 (스펙에 아예 없는 버전)"),
     ("2024-11-05", "2024-11-05 (최소 지원 미만)"),
@@ -37,6 +58,55 @@ SESSIONS: set[str] = set()
 SCENARIO_LOCK = Lock()
 ACTIVE_SCENARIO = "ok"
 ACTIVE_CONFIG: dict[str, Any] = {}
+
+# In-memory ring buffer of recent /mcp exchanges, surfaced by the /inspect page
+# so the 2026 wire (headers + _meta envelope + response) is visible live.
+INSPECT_LOCK = Lock()
+INSPECT_LOG: deque[dict[str, Any]] = deque(maxlen=50)
+INSPECT_SEQ = 0
+# Only these request headers are interesting for MCP wire inspection.
+INSPECT_HEADER_PREFIXES = ("mcp-", "x-mcp-")
+INSPECT_HEADER_NAMES = ("accept", "content-type", "authorization")
+
+
+def record_exchange(
+    method_http: str,
+    path: str,
+    request_headers: Any,
+    request_body: Any,
+    status: int,
+    response_body: Any,
+) -> None:
+    """Append one /mcp exchange to the inspection ring buffer."""
+    global INSPECT_SEQ
+    headers = {}
+    for name, value in (request_headers.items() if request_headers else []):
+        lowered = name.lower()
+        if lowered in INSPECT_HEADER_NAMES or lowered.startswith(INSPECT_HEADER_PREFIXES):
+            headers[name] = value
+    jsonrpc_method = request_body.get("method") if isinstance(request_body, dict) else None
+    era = request_era(request_body, dict(request_headers) if request_headers else None)
+    with INSPECT_LOCK:
+        INSPECT_SEQ += 1
+        INSPECT_LOG.appendleft(
+            {
+                "seq": INSPECT_SEQ,
+                "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                "httpMethod": method_http,
+                "path": path,
+                "era": era,
+                "method": jsonrpc_method,
+                "requestHeaders": headers,
+                "requestBody": request_body,
+                "status": status,
+                "responseBody": response_body,
+            }
+        )
+
+
+def inspect_snapshot() -> list[dict[str, Any]]:
+    with INSPECT_LOCK:
+        return list(INSPECT_LOG)
 
 SCENARIO_TITLES = {
     "ok": "정상 응답",
@@ -203,6 +273,10 @@ TOOL_ERROR_GROUPS = (
     ),
 )
 
+# Scenarios that only make sense in the 2025 (handshake) transport. The 2026
+# transport has no initialize step, so unsupported-min-version has no meaning.
+ERA_2025_ONLY_SCENARIOS = ("unsupported-min-version",)
+
 TOOLS_LIST_MODES = {
     "normal": "정상 tools 반환",
     "json-rpc-error": "JSON-RPC error 반환",
@@ -212,6 +286,14 @@ TOOLS_LIST_MODES = {
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    # "2025" -> initialize handshake + session id (legacy).
+    # "2026" -> stateless per-request _meta, no handshake/session.
+    "protocolEra": "2025",
+    # When True, the server refuses any request that is NOT on the 2026 transport
+    # (i.e. legacy initialize-handshake clients) with -32022. Used to verify that
+    # an older client which doesn't speak 2026-07-28 actually errors out against a
+    # 2026-only server, instead of silently succeeding via the hospitable legacy path.
+    "rejectLegacy": False,
     "mcp": {
         "identifier": SERVER_NAME,
         "serviceName": SERVICE_NAME,
@@ -515,6 +597,14 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
         return default_config()
 
     config = default_config()
+
+    protocol_era = str(raw_config.get("protocolEra", config["protocolEra"])).strip()
+    if protocol_era not in {"2025", "2026"}:
+        raise ValueError("protocolEra must be 2025 or 2026")
+    config["protocolEra"] = protocol_era
+
+    config["rejectLegacy"] = bool(raw_config.get("rejectLegacy", config["rejectLegacy"]))
+
     mcp = raw_config.get("mcp") if isinstance(raw_config.get("mcp"), dict) else {}
     server = raw_config.get("server") if isinstance(raw_config.get("server"), dict) else {}
     initialize = raw_config.get("initialize") if isinstance(raw_config.get("initialize"), dict) else {}
@@ -821,10 +911,130 @@ def tools_for_config(config: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def request_meta(payload: Any) -> dict[str, Any]:
+    """Extract params._meta as a dict (empty if absent/malformed)."""
+    if not isinstance(payload, dict):
+        return {}
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return {}
+    meta = params.get("_meta")
+    return meta if isinstance(meta, dict) else {}
+
+
+def request_era(payload: Any, headers: dict[str, str] | None = None) -> str:
+    """Decide whether a request uses the 2026 (stateless) transport.
+
+    The 2026 transport is identified by its *markers*, not by the version
+    value: the ``Mcp-Method`` routing header, or a ``params._meta`` carrying the
+    protocolVersion key. This is deliberate — a 2026 client asking for a version
+    the server does not support must still be routed into the 2026 path so it
+    gets -32022, rather than silently falling back to legacy. Legacy 2025 never
+    sends ``Mcp-Method`` nor the ``_meta`` envelope, so it stays on the old path.
+    """
+    lowered = {name.lower(): value for name, value in (headers or {}).items()}
+    if "mcp-method" in lowered:
+        return "2026"
+    if str(lowered.get("mcp-protocol-version", "")).strip() == PROTOCOL_VERSION_2026:
+        return "2026"
+    if META_PROTOCOL_VERSION in request_meta(payload):
+        return "2026"
+    return "2025"
+
+
+def validate_2026_request(
+    payload: Any,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Validate a 2026-07-28 request's headers and _meta envelope.
+
+    Returns a JSON-RPC error dict if the request is malformed, else None.
+    The HTTP layer maps any returned error to a 400 response.
+    """
+    headers = headers or {}
+    request_id = payload.get("id") if isinstance(payload, dict) else None
+    method = payload.get("method") if isinstance(payload, dict) else None
+    meta = request_meta(payload)
+
+    # Case-insensitive header lookup.
+    lowered = {name.lower(): value for name, value in headers.items()}
+
+    # Protocol version: header must match body _meta.
+    header_version = str(lowered.get("mcp-protocol-version", "")).strip()
+    meta_version = str(meta.get(META_PROTOCOL_VERSION, "")).strip()
+    if not meta_version:
+        return json_rpc_error(
+            request_id, ERR_INVALID_PARAMS, f"Missing _meta '{META_PROTOCOL_VERSION}'"
+        )
+    if header_version and header_version != meta_version:
+        return json_rpc_error(
+            request_id,
+            ERR_HEADER_MISMATCH,
+            f"Header mismatch: MCP-Protocol-Version '{header_version}' "
+            f"does not match body value '{meta_version}'",
+        )
+    if meta_version not in SUPPORTED_PROTOCOL_VERSIONS:
+        return json_rpc_error(
+            request_id,
+            ERR_UNSUPPORTED_VERSION,
+            f"Unsupported protocol version '{meta_version}'. "
+            f"Supported: {', '.join(SUPPORTED_PROTOCOL_VERSIONS)}",
+        )
+
+    # clientCapabilities is a required envelope field.
+    if META_CLIENT_CAPABILITIES not in meta:
+        return json_rpc_error(
+            request_id, ERR_INVALID_PARAMS, f"Missing _meta '{META_CLIENT_CAPABILITIES}'"
+        )
+
+    # Mcp-Method header is required and must match body method.
+    header_method = lowered.get("mcp-method")
+    if header_method is None:
+        return json_rpc_error(request_id, ERR_HEADER_MISMATCH, "Missing Mcp-Method header")
+    if header_method != method:
+        return json_rpc_error(
+            request_id,
+            ERR_HEADER_MISMATCH,
+            f"Header mismatch: Mcp-Method '{header_method}' does not match body '{method}'",
+        )
+
+    # Mcp-Name header is required for name-bearing methods and must match the body.
+    if method in NAME_BEARING_METHODS:
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        body_name = params.get(NAME_BEARING_METHODS[method])
+        header_name = lowered.get("mcp-name")
+        if header_name is None:
+            return json_rpc_error(
+                request_id, ERR_HEADER_MISMATCH, f"Missing Mcp-Name header for {method}"
+            )
+        if header_name != body_name:
+            return json_rpc_error(
+                request_id,
+                ERR_HEADER_MISMATCH,
+                f"Header mismatch: Mcp-Name '{header_name}' does not match body '{body_name}'",
+            )
+    return None
+
+
+def json_rpc_result_2026(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a result in the 2026 envelope: resultType + _meta.serverInfo.
+
+    The handler-provided result may set its own resultType (e.g. an error
+    scenario that omits it); only fill defaults when absent.
+    """
+    enriched = dict(result)
+    enriched.setdefault("resultType", "complete")
+    meta = dict(enriched.get("_meta") or {})
+    meta.setdefault(META_SERVER_INFO, {"name": SERVER_NAME, "version": SERVER_VERSION})
+    enriched["_meta"] = meta
+    return {"jsonrpc": "2.0", "id": request_id, "result": enriched}
+
+
 def handle_json_rpc(
     payload: Any,
     scenario: str = "ok",
     config: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], dict[str, Any] | None]:
     scenario = normalize_scenario(scenario)
     config = normalize_config(config) if config is not None else scenario_to_config(scenario)
@@ -834,6 +1044,28 @@ def handle_json_rpc(
     request_id = payload.get("id")
     method = payload.get("method")
     is_notification = "id" not in payload
+
+    # 2026-07-28: stateless, per-request metadata. Detect via header/_meta and,
+    # for actual requests, validate the envelope before dispatching.
+    is_2026 = request_era(payload, headers) == "2026"
+
+    # 2026-only mode: a legacy (handshake) client that does not speak the 2026
+    # transport is refused with -32022 instead of being served via the old path.
+    # This is how we prove an older client actually breaks against a 2026 server.
+    if config.get("rejectLegacy") and not is_2026 and not is_notification:
+        return 400, {}, json_rpc_error(
+            request_id,
+            ERR_UNSUPPORTED_VERSION,
+            "This server only supports protocol version "
+            f"{PROTOCOL_VERSION_2026}. Legacy initialize-handshake clients are "
+            f"not accepted. Supported: {PROTOCOL_VERSION_2026}",
+        )
+
+    if is_2026 and not is_notification:
+        error = validate_2026_request(payload, headers)
+        if error is not None:
+            return 400, {}, error
+        return handle_json_rpc_2026(payload, config, request_id, method)
 
     if method == "initialize":
         session_id = str(uuid.uuid4())
@@ -876,6 +1108,58 @@ def handle_json_rpc(
 
     if is_notification:
         return 202, {}, None
+    return 200, {}, json_rpc_error(request_id, -32601, f"Method not found: {method}")
+
+
+def handle_json_rpc_2026(
+    payload: dict[str, Any],
+    config: dict[str, Any],
+    request_id: Any,
+    method: Any,
+) -> tuple[int, dict[str, str], dict[str, Any] | None]:
+    """Dispatch a validated 2026-07-28 request.
+
+    Stateless: no initialize handshake, no session id. Results carry the 2026
+    envelope (resultType + _meta.serverInfo) via json_rpc_result_2026.
+    """
+    if method == "initialize":
+        # 2026 has no handshake, but a client may still probe. Respond without a
+        # session id, advertising the negotiated version.
+        result = {
+            "protocolVersion": PROTOCOL_VERSION_2026,
+            "capabilities": {"tools": {"listChanged": True}},
+            "serverInfo": {"name": config["mcp"]["identifier"], "version": SERVER_VERSION},
+        }
+        return 200, {}, json_rpc_result_2026(request_id, result)
+
+    if method == "server/discover":
+        # Modern (2026) connect-time probe — the stateless replacement for the
+        # initialize handshake. Advertise supported versions + capabilities so
+        # the SDK client can adopt() and proceed to tools/list, tools/call.
+        result = {
+            "supportedVersions": [PROTOCOL_VERSION_2026],
+            "capabilities": {"tools": {"listChanged": True}},
+            "serverInfo": {"name": config["mcp"]["identifier"], "version": SERVER_VERSION},
+        }
+        return 200, {}, json_rpc_result_2026(request_id, result)
+
+    if method == "ping":
+        return 200, {}, json_rpc_result_2026(request_id, {})
+
+    if method == "tools/list":
+        if config["toolsList"]["mode"] == "json-rpc-error":
+            return 200, {}, json_rpc_error(request_id, -32603, "Injected tools/list failure")
+        scenario_tools = tools_for_config(config)
+        result = dict(scenario_tools or {"tools": tools(config["mcp"]["serviceName"])})
+        # 2026 cacheable-list hints are required fields on ListToolsResult.
+        result.setdefault("ttlMs", 0)
+        result.setdefault("cacheScope", "private")
+        return 200, {}, json_rpc_result_2026(request_id, result)
+
+    if method == "tools/call":
+        result = call_tool(payload.get("params"))
+        return 200, {}, json_rpc_result_2026(request_id, result)
+
     return 200, {}, json_rpc_error(request_id, -32601, f"Method not found: {method}")
 
 
@@ -1035,6 +1319,387 @@ def scenario_group_label(scenario: str) -> str:
     return "기타"
 
 
+def render_inspect_page() -> str:
+    """Live viewer for recent /mcp exchanges (request headers + body, response).
+
+    Plain (non f-string) template so the embedded JS braces need no escaping.
+    The page polls /inspect/log and re-renders on change.
+    """
+    tool_names = [tool["name"] for tool in tools()]
+    return _INSPECT_PAGE.replace("__CONVERT_TOOLS__", json.dumps(tool_names))
+
+
+_INSPECT_PAGE = """<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unit Expert MCP · Wire Inspector</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #0f1420;
+      color: #e6e9ef;
+      line-height: 1.45;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      padding: 14px 20px;
+      background: #161d2e;
+      border-bottom: 1px solid #2a3346;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+    header .meta { color: #8b95a7; font-size: 12px; }
+    header .spacer { flex: 1; }
+    button, label.toggle {
+      font: inherit; font-size: 12px;
+      background: #223049; color: #cdd6e6; border: 1px solid #33415c;
+      border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    }
+    button:hover { background: #2b3b57; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #3ddc84; display: inline-block; margin-right: 6px; }
+    .status-dot.paused { background: #f5a623; }
+    main { padding: 16px 20px 60px; display: flex; flex-direction: column; gap: 12px; }
+    .empty { color: #6b7488; padding: 40px; text-align: center; }
+    .row {
+      border: 1px solid #2a3346; border-radius: 12px; overflow: hidden;
+      background: #131a29;
+    }
+    .row-head {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 10px 14px; cursor: pointer; user-select: none;
+    }
+    .row-head:hover { background: #182135; }
+    .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+    .badge.era-2026 { background: #0e766e; color: #eafffb; }
+    .badge.era-2025 { background: #394a63; color: #cdd6e6; }
+    .badge.ok { background: #14532d; color: #d5f5e0; }
+    .badge.err { background: #5a1d1d; color: #ffd9d5; }
+    .method { font-weight: 700; color: #9ecbff; }
+    .time { color: #6b7488; font-size: 12px; }
+    .rid { color: #6b7488; font-size: 12px; }
+    .row-head .spacer { flex: 1; }
+    .row-body { display: none; border-top: 1px solid #2a3346; padding: 12px 14px; gap: 14px; }
+    .row.open .row-body { display: grid; grid-template-columns: 1fr 1fr; }
+    @media (max-width: 820px) { .row.open .row-body { grid-template-columns: 1fr; } }
+    .pane h3 { margin: 0 0 6px; font-size: 12px; color: #8b95a7; text-transform: uppercase; letter-spacing: 0.05em; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; background: #0c1220; border: 1px solid #212a3d; border-radius: 8px; padding: 10px; }
+    .hdr-line { color: #b7c3d8; }
+    .hdr-line b { color: #9ecbff; font-weight: 600; }
+    .console {
+      border: 1px solid #2a3346; border-radius: 12px; background: #131a29;
+      padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;
+    }
+    .console h2 { margin: 0; font-size: 14px; font-weight: 700; }
+    .console .hint { color: #8b95a7; font-size: 12px; margin: -4px 0 0; }
+    .console-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+    .field-c { display: flex; flex-direction: column; gap: 4px; }
+    .field-c label { font-size: 11px; color: #8b95a7; text-transform: uppercase; letter-spacing: 0.04em; }
+    .console select, .console input {
+      font: inherit; font-size: 13px; background: #0c1220; color: #e6e9ef;
+      border: 1px solid #33415c; border-radius: 8px; padding: 7px 10px; min-width: 90px;
+    }
+    .console input.val { width: 90px; }
+    .send-btn { background: #0e766e; color: #eafffb; border-color: #0e766e; font-weight: 700; padding: 8px 20px; }
+    .send-btn:hover { background: #109c91; }
+    .send-btn:disabled { opacity: 0.5; cursor: default; }
+    .console .arg-fields { display: contents; }
+    .console .arg-fields.hidden { display: none; }
+    .call-note { color: #6b7488; font-size: 12px; margin: 0; }
+    .console code { background: #223049; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+    .reset-btn { background: #223049; color: #cdd6e6; border: 1px solid #33415c; font-weight: 600; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+    .reset-btn:hover { background: #2b3b57; }
+    .editor-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .editor-col { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 260px; }
+    .editor-col label { font-size: 11px; color: #8b95a7; text-transform: uppercase; letter-spacing: 0.04em; }
+    .console textarea {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+      background: #0c1120; color: #e6e9ef; border: 1px solid #33415c;
+      border-radius: 8px; padding: 8px 10px; resize: vertical; width: 100%;
+    }
+    .console textarea:focus { outline: none; border-color: #0e766e; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🔌 MCP Wire Inspector</h1>
+    <span class="meta" id="meta">최근 /mcp 요청·응답을 실시간으로 표시합니다.</span>
+    <span class="spacer"></span>
+    <label class="toggle"><span class="status-dot" id="dot"></span><span id="liveLabel">실시간</span> ·
+      <input type="checkbox" id="liveToggle" checked style="vertical-align:middle"></label>
+    <button id="clearBtn" type="button">화면 비우기</button>
+  </header>
+  <main>
+    <div class="console">
+      <h2>▶ 요청 보내기</h2>
+      <p class="hint">이 페이지의 /mcp로 2026-07-28 요청을 직접 조립해서 보냅니다. (브라우저 fetch — SDK와 동일한 wire)</p>
+      <div class="console-row">
+        <div class="field-c">
+          <label>메서드</label>
+          <select id="cMethod">
+            <option value="server/discover">server/discover</option>
+            <option value="tools/list">tools/list</option>
+            <option value="tools/call" selected>tools/call</option>
+            <option value="ping">ping</option>
+          </select>
+        </div>
+        <div class="field-c arg-fields" id="callFields">
+          <div class="field-c">
+            <label>도구 (tools/call)</label>
+            <select id="cTool"></select>
+          </div>
+          <div class="field-c" id="fVal">
+            <label>value</label>
+            <input class="val" id="cValue" type="number" value="1">
+          </div>
+          <div class="field-c" id="fFrom">
+            <label>from_unit</label>
+            <input class="val" id="cFrom" type="text" value="m">
+          </div>
+          <div class="field-c" id="fTo">
+            <label>to_unit</label>
+            <input class="val" id="cTo" type="text" value="cm">
+          </div>
+        </div>
+        <div class="field-c">
+          <label>&nbsp;</label>
+          <button class="reset-btn" id="fillBtn" type="button">↺ 컨트롤로 채우기</button>
+        </div>
+      </div>
+      <p class="hint">아래 헤더·본문을 직접 수정해서 보낼 수 있습니다. 예: <code>_meta</code>를 지우거나 헤더를 틀리게 바꿔 위반 응답(-32602/-32020/-32022)을 확인하세요. <b>보내기는 아래 내용을 그대로 전송</b>합니다.</p>
+      <div class="editor-row">
+        <div class="editor-col">
+          <label>헤더 (한 줄에 <code>Key: Value</code>)</label>
+          <textarea id="hdrBox" spellcheck="false" rows="5"></textarea>
+        </div>
+        <div class="editor-col">
+          <label>본문 (JSON — 그대로 전송, 깨진 JSON도 가능)</label>
+          <textarea id="bodyBox" spellcheck="false" rows="10"></textarea>
+        </div>
+      </div>
+      <div class="console-row">
+        <button class="send-btn" id="sendBtn" type="button">보내기</button>
+        <p class="call-note" id="callNote"></p>
+      </div>
+    </div>
+    <div class="empty" id="empty">아직 기록된 요청이 없습니다. 위에서 요청을 보내거나, 외부 클라이언트가 이 서버의 /mcp로 요청하면 여기에 나타납니다.</div>
+    <div id="list"></div>
+  </main>
+  <script>
+    const listEl = document.getElementById("list");
+    const emptyEl = document.getElementById("empty");
+    const metaEl = document.getElementById("meta");
+    const dotEl = document.getElementById("dot");
+    const liveToggle = document.getElementById("liveToggle");
+    const liveLabel = document.getElementById("liveLabel");
+    const openRows = new Set();
+    let hideBefore = 0;
+    let lastSignature = "";
+
+    // --- Request console -------------------------------------------------
+    const CONVERT_TOOLS = __CONVERT_TOOLS__;
+    const protocolVersion2026 = "2026-07-28";
+    const cMethod = document.getElementById("cMethod");
+    const cTool = document.getElementById("cTool");
+    const callFields = document.getElementById("callFields");
+    const sendBtn = document.getElementById("sendBtn");
+    const fillBtn = document.getElementById("fillBtn");
+    const callNote = document.getElementById("callNote");
+    const cValue = document.getElementById("cValue");
+    const cFrom = document.getElementById("cFrom");
+    const cTo = document.getElementById("cTo");
+    const hdrBox = document.getElementById("hdrBox");
+    const bodyBox = document.getElementById("bodyBox");
+
+    CONVERT_TOOLS.forEach((name) => {
+      const opt = document.createElement("option");
+      opt.value = name; opt.textContent = name;
+      cTool.appendChild(opt);
+    });
+
+    function syncConsole() {
+      const isCall = cMethod.value === "tools/call";
+      callFields.classList.toggle("hidden", !isCall);
+      // list_supported_units takes no args → hide the value/unit inputs.
+      const needsArgs = isCall && cTool.value !== "list_supported_units";
+      document.getElementById("fVal").style.display = needsArgs ? "" : "none";
+      document.getElementById("fFrom").style.display = needsArgs ? "" : "none";
+      document.getElementById("fTo").style.display = needsArgs ? "" : "none";
+    }
+    cMethod.addEventListener("change", syncConsole);
+    cTool.addEventListener("change", syncConsole);
+
+    // Build a *correct* draft from the controls. The user can then freely
+    // edit the header/body boxes (delete _meta, break a header) before sending.
+    function buildDraft() {
+      const method = cMethod.value;
+      const meta = {
+        "io.modelcontextprotocol/protocolVersion": protocolVersion2026,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": { name: "inspect-console", version: "1.0" }
+      };
+      const params = { _meta: meta };
+      const headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "MCP-Protocol-Version": protocolVersion2026,
+        "Mcp-Method": method
+      };
+      if (method === "tools/call") {
+        const tool = cTool.value;
+        params.name = tool;
+        headers["Mcp-Name"] = tool;
+        if (tool === "list_supported_units") {
+          params.arguments = {};
+        } else {
+          params.arguments = {
+            value: Number(cValue.value),
+            from_unit: cFrom.value.trim(),
+            to_unit: cTo.value.trim()
+          };
+        }
+      }
+      const body = { jsonrpc: "2.0", id: 1, method, params };
+      return { headers, body };
+    }
+
+    function fillFromControls() {
+      const { headers, body } = buildDraft();
+      hdrBox.value = Object.keys(headers).map((k) => `${k}: ${headers[k]}`).join("\\n");
+      bodyBox.value = JSON.stringify(body, null, 2);
+      callNote.textContent = "컨트롤 값으로 채웠습니다. 이제 자유롭게 수정 후 보내기.";
+    }
+    fillBtn.addEventListener("click", fillFromControls);
+
+    // Parse the header box verbatim: each non-empty line "Key: Value".
+    function parseHeaders(text) {
+      const headers = {};
+      text.split("\\n").forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        const idx = trimmed.indexOf(":");
+        if (idx === -1) return;      // malformed line → skipped, on purpose
+        const key = trimmed.slice(0, idx).trim();
+        const value = trimmed.slice(idx + 1).trim();
+        if (key) headers[key] = value;
+      });
+      return headers;
+    }
+
+    async function sendRequest() {
+      // Send whatever is in the boxes, verbatim — no correction, no validation.
+      const headers = parseHeaders(hdrBox.value);
+      const rawBody = bodyBox.value;
+      sendBtn.disabled = true;
+      const prev = sendBtn.textContent;
+      sendBtn.textContent = "전송 중…";
+      callNote.textContent = "";
+      try {
+        const res = await fetch("/mcp", { method: "POST", headers, body: rawBody });
+        callNote.textContent = `HTTP ${res.status} · 아래 로그 최상단에 기록됨`;
+        lastSignature = "";        // force re-render on next poll
+        poll();
+      } catch (e) {
+        callNote.textContent = "요청 실패: " + (e && e.message ? e.message : e);
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = prev;
+      }
+    }
+    sendBtn.addEventListener("click", sendRequest);
+    syncConsole();
+    fillFromControls();   // seed the boxes with a valid request on load
+
+    function esc(value) {
+      return String(value)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    function pretty(value) {
+      if (typeof value === "string") return esc(value);
+      try { return esc(JSON.stringify(value, null, 2)); } catch (e) { return esc(String(value)); }
+    }
+    function headerLines(headers) {
+      const keys = Object.keys(headers || {});
+      if (!keys.length) return "<span class=\\"hdr-line\\">(없음)</span>";
+      return keys.map((k) => `<div class="hdr-line"><b>${esc(k)}</b>: ${esc(headers[k])}</div>`).join("");
+    }
+    function render(exchanges) {
+      const visible = exchanges.filter((x) => x.seq > hideBefore);
+      emptyEl.style.display = visible.length ? "none" : "block";
+      metaEl.textContent = `표시 ${visible.length}건 · 버퍼 ${exchanges.length}건 (최대 50)`;
+      listEl.innerHTML = visible.map((x) => {
+        const ok = x.status < 400;
+        const open = openRows.has(x.seq) ? " open" : "";
+        const errCode = x.responseBody && x.responseBody.error ? x.responseBody.error.code : null;
+        const statusText = errCode !== null && errCode !== undefined ? `${x.status} · ${errCode}` : x.status;
+        return `
+        <div class="row${open}" data-seq="${x.seq}">
+          <div class="row-head">
+            <span class="time">${esc(x.time)}</span>
+            <span class="badge era-${x.era === "2026" ? "2026" : "2025"}">${esc(x.era)}</span>
+            <span class="method">${esc(x.method || x.httpMethod)}</span>
+            <span class="spacer"></span>
+            <span class="badge ${ok ? "ok" : "err"}">${esc(statusText)}</span>
+          </div>
+          <div class="row-body">
+            <div class="pane">
+              <h3>요청 헤더</h3>
+              <pre>${headerLines(x.requestHeaders)}</pre>
+              <h3 style="margin-top:10px">요청 바디</h3>
+              <pre>${pretty(x.requestBody)}</pre>
+            </div>
+            <div class="pane">
+              <h3>응답 (HTTP ${esc(x.status)})</h3>
+              <pre>${pretty(x.responseBody)}</pre>
+            </div>
+          </div>
+        </div>`;
+      }).join("");
+    }
+    listEl.addEventListener("click", (event) => {
+      const row = event.target.closest(".row");
+      if (!row) return;
+      const seq = Number(row.dataset.seq);
+      if (openRows.has(seq)) { openRows.delete(seq); row.classList.remove("open"); }
+      else { openRows.add(seq); row.classList.add("open"); }
+    });
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      // Client-side clear: hide everything currently buffered without touching the server.
+      const rows = listEl.querySelectorAll(".row");
+      let maxSeq = hideBefore;
+      rows.forEach((r) => { maxSeq = Math.max(maxSeq, Number(r.dataset.seq)); });
+      hideBefore = maxSeq;
+      openRows.clear();
+      lastSignature = "";
+      poll();
+    });
+    liveToggle.addEventListener("change", () => {
+      dotEl.classList.toggle("paused", !liveToggle.checked);
+      liveLabel.textContent = liveToggle.checked ? "실시간" : "일시정지";
+    });
+    async function poll() {
+      try {
+        const res = await fetch("/inspect/log", { cache: "no-store" });
+        const data = await res.json();
+        const exchanges = data.exchanges || [];
+        const signature = exchanges.length ? `${exchanges[0].seq}:${exchanges.length}:${hideBefore}` : `0:0:${hideBefore}`;
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          render(exchanges);
+        }
+      } catch (e) { /* keep polling */ }
+    }
+    setInterval(() => { if (liveToggle.checked) poll(); }, 1000);
+    poll();
+  </script>
+</body>
+</html>"""
+
+
 def render_scenario_page(message: str | None = None, error: str | None = None) -> str:
     active_scenario = get_active_scenario()
     active_config = get_active_config()
@@ -1058,9 +1723,14 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
             conflict_attr = (
                 f' data-conflict="{escape(conflict_group)}"' if conflict_group else ""
             )
+            # initialize/handshake-only scenarios don't exist in the stateless
+            # 2026 transport, so hide them when the 2026 toggle is active.
+            row_class = "check-row"
+            if scenario in ERA_2025_ONLY_SCENARIOS:
+                row_class += " era-2025-only"
             controls.append(
                 f"""
-        <label class="check-row">
+        <label class="{row_class}">
           <input type="checkbox" name="serverErrors" value="{escape(scenario)}"{conflict_attr}>
           <span>{escape(SCENARIO_TITLES[scenario])}</span>
           <code>{escape(scenario)}</code>
@@ -2189,6 +2859,68 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       .terminal {{ min-height: 360px; }}
       .terminal pre {{ min-height: 314px; }}
     }}
+    .era-toggle {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+      flex-shrink: 0;
+    }}
+    .era-toggle-label {{
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }}
+    .era-toggle-buttons {{
+      display: inline-flex;
+      background: #e9eef7;
+      border: 1px solid #c8d1df;
+      border-radius: 10px;
+      padding: 3px;
+      gap: 3px;
+    }}
+    .era-button {{
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+      padding: 6px 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+    }}
+    .era-button.is-active {{
+      background: var(--accent);
+      color: #ffffff;
+      box-shadow: 0 1px 2px rgba(15, 118, 110, 0.35);
+    }}
+    .era-toggle-hint {{
+      margin: 0;
+      font-size: 12px;
+      color: var(--muted);
+      max-width: 260px;
+      text-align: right;
+    }}
+    body[data-era="2026"] .era-2025-only {{
+      display: none !important;
+    }}
+    body[data-era="2026"] .era-2026-badge {{
+      display: inline-flex;
+    }}
+    .era-2026-badge {{
+      display: none;
+      margin-left: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent-strong);
+      background: #d7f2ee;
+      border-radius: 6px;
+      padding: 2px 8px;
+      vertical-align: middle;
+    }}
   </style>
 </head>
 <body>
@@ -2199,6 +2931,14 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         <div class="title-note">
           MCP 상태는 서버 전역으로 공유됩니다. 여러 사용자가 동시에 적용하면 마지막 적용값으로 바뀔 수 있습니다.
         </div>
+      </div>
+      <div class="era-toggle" role="group" aria-label="프로토콜 버전 선택">
+        <span class="era-toggle-label">프로토콜 버전</span>
+        <div class="era-toggle-buttons">
+          <button type="button" class="era-button" data-era="2025">2025</button>
+          <button type="button" class="era-button" data-era="2026">2026</button>
+        </div>
+        <p class="era-toggle-hint" id="eraHint"></p>
       </div>
     </header>
     <div class="workspace">
@@ -2358,7 +3098,18 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     const mcpServiceName = document.getElementById("mcpServiceName");
     const publicMcpUrl = {json.dumps(PUBLIC_MCP_URL)};
     const configQueryParam = {json.dumps(CONFIG_QUERY_PARAM)};
+    const protocolVersion2026 = {json.dumps(PROTOCOL_VERSION_2026)};
+    const metaProtocolVersionKey = {json.dumps(META_PROTOCOL_VERSION)};
+    const metaClientCapabilitiesKey = {json.dumps(META_CLIENT_CAPABILITIES)};
+    const metaClientInfoKey = {json.dumps(META_CLIENT_INFO)};
+    const eraButtons = Array.from(document.querySelectorAll(".era-button"));
+    const eraHint = document.getElementById("eraHint");
+    const eraHints = {{
+      "2025": "initialize 핸드셰이크 + 세션ID를 쓰는 기존 방식입니다.",
+      "2026": "핸드셰이크 없이 요청마다 _meta·헤더를 싣는 stateless 방식입니다."
+    }};
     let appliedConfig = clone(initialConfig);
+    let currentEra = appliedConfig.protocolEra === "2026" ? "2026" : "2025";
 
     function clone(value) {{
       return JSON.parse(JSON.stringify(value));
@@ -2545,6 +3296,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         ["normal", "too-many"].includes(mode) && serverErrors.includes("duplicate-tool-name");
       const toolErrors = mode === "normal" ? selectedToolErrors() : [];
       return {{
+        protocolEra: currentEra,
         mcp: {{
           identifier: mcpIdentifier.value.trim() || defaultConfig.mcp.identifier,
           serviceName: mcpServiceName.value.trim() || defaultConfig.mcp.serviceName
@@ -2693,14 +3445,25 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       updateConfigSummary(config);
     }}
 
-    async function postMcp(payload, config) {{
+    async function postMcp(payload, config, extraHeaders) {{
+      const era = (config && config.protocolEra === "2026") ? "2026" : "2025";
+      const headers = {{ "Content-Type": "application/json" }};
+      if (era === "2026") {{
+        // Stateless transport: single JSON response, per-request routing headers.
+        headers["Accept"] = "application/json";
+        headers["MCP-Protocol-Version"] = protocolVersion2026;
+        headers["Mcp-Method"] = payload.method;
+        if (payload.params && typeof payload.params.name === "string") {{
+          headers["Mcp-Name"] = payload.params.name;
+        }}
+      }} else {{
+        headers["Accept"] = "application/json, text/event-stream";
+        headers["MCP-Protocol-Version"] = "2025-03-26";
+      }}
+      Object.assign(headers, extraHeaders || {{}});
       const response = await fetch(buildLocalMcpPath(config), {{
         method: "POST",
-        headers: {{
-          "Content-Type": "application/json",
-          "Accept": "application/json, text/event-stream",
-          "MCP-Protocol-Version": "2025-03-26"
-        }},
+        headers,
         body: JSON.stringify(payload)
       }});
       const text = await response.text();
@@ -2715,11 +3478,51 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }};
     }}
 
+    function meta2026() {{
+      const meta = {{}};
+      meta[metaProtocolVersionKey] = protocolVersion2026;
+      meta[metaClientCapabilitiesKey] = {{}};
+      meta[metaClientInfoKey] = {{ name: "scenario-ui", version: "1.0" }};
+      return meta;
+    }}
+
     async function refreshPreview(config) {{
       const title = activeTitle.textContent;
       const group = activeGroup.textContent;
-      preview.textContent = `$ 구분: ${{group}}\\n$ 설정: ${{title}}\\n$ POST /mcp initialize\\n...`;
+      const era = (config && config.protocolEra === "2026") ? "2026" : "2025";
+      preview.textContent = `$ 구분: ${{group}}\\n$ 설정: ${{title}}\\n$ POST /mcp (${{era}})\\n...`;
       try {{
+        if (era === "2026") {{
+          // No handshake: send tools/list directly with the _meta envelope.
+          const toolsList = await postMcp({{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/list",
+            params: {{ _meta: meta2026() }}
+          }}, config);
+          const toolsCall = await postMcp({{
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/call",
+            params: {{
+              name: "convert_length",
+              arguments: {{ value: 1, from_unit: "m", to_unit: "cm" }},
+              _meta: meta2026()
+            }}
+          }}, config);
+          preview.textContent = [
+            `$ 구분: ${{group}}`,
+            `$ 설정: ${{title}}`,
+            `$ 프로토콜: ${{protocolVersion2026}} (stateless)`,
+            `$ 적용 JSON`,
+            pretty(config),
+            "",
+            formatHttp("POST /mcp tools/list", toolsList),
+            "",
+            formatHttp("POST /mcp tools/call convert_length", toolsCall)
+          ].join("\\n");
+          return;
+        }}
         const initialize = await postMcp({{
           jsonrpc: "2.0",
           id: 1,
@@ -2750,6 +3553,37 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         preview.textContent = `$ 설정: ${{title}}\\n${{error && error.stack ? error.stack : error}}`;
       }}
     }}
+
+    function setEra(era, options) {{
+      const opts = options || {{}};
+      currentEra = era === "2026" ? "2026" : "2025";
+      document.body.setAttribute("data-era", currentEra);
+      eraButtons.forEach((button) => {{
+        button.classList.toggle("is-active", button.dataset.era === currentEra);
+      }});
+      if (eraHint) {{
+        eraHint.textContent = eraHints[currentEra] || "";
+      }}
+      if (currentEra === "2026") {{
+        // 2025-only scenarios are hidden in 2026; clear them so a stale check
+        // doesn't leak into collectConfig via the :checked query.
+        document.querySelectorAll(".era-2025-only input[type=checkbox]").forEach((input) => {{
+          input.checked = false;
+        }});
+      }}
+      if (opts.silent) return;
+      // Switching era invalidates 2025-only selections; recollect and re-apply.
+      const config = collectConfig();
+      appliedConfig = clone(config);
+      setControls(appliedConfig);
+      updateSummary(appliedConfig, true);
+      setGeneratedUrl(appliedConfig, true);
+      refreshPreview(appliedConfig);
+    }}
+
+    eraButtons.forEach((button) => {{
+      button.addEventListener("click", () => setEra(button.dataset.era));
+    }});
 
     applyConfig.addEventListener("click", () => {{
       const config = collectConfig();
@@ -2802,6 +3636,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }}
     }});
 
+    setEra(currentEra, {{ silent: true }});
     setControls(appliedConfig);
     updateSummary(appliedConfig, true);
     setGeneratedUrl(appliedConfig, false);
@@ -2830,8 +3665,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(200, render_scenario_page())
             return
 
+        if path == "/inspect":
+            self.send_html(200, render_inspect_page())
+            return
+
+        if path == "/inspect/log":
+            self.send_json(200, {"exchanges": inspect_snapshot()})
+            return
+
         if path != "/mcp":
             self.send_text(404, "Not found")
+            return
+
+        # 2026-07-28 removed the GET stream endpoint (stateless). A 2026 client
+        # (detected via MCP-Protocol-Version) gets 405; legacy keeps the stream.
+        if request_era(None, self.headers) == "2026":
+            self.send_405()
             return
 
         try:
@@ -2858,6 +3707,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b": connected\n\n")
 
+    def do_DELETE(self) -> None:
+        # 2026-07-28 is stateless: there is no session to terminate, so DELETE
+        # /mcp is not allowed. Legacy also has no DELETE handling here.
+        path = urlparse(self.path).path
+        if path == "/mcp":
+            self.send_405()
+            return
+        self.send_text(404, "Not found")
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/scenario":
@@ -2871,15 +3729,25 @@ class Handler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(content_length)
 
-        accept = self.headers.get("Accept", "")
-        if "application/json" not in accept or "text/event-stream" not in accept:
-            self.send_text(400, "Invalid Accept headers. Expected TEXT_EVENT_STREAM and APPLICATION_JSON")
-            return
-
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
-            self.send_json(400, json_rpc_error(None, -32700, "Parse error"))
+            error = json_rpc_error(None, -32700, "Parse error")
+            record_exchange("POST", path, self.headers, raw_body.decode("utf-8", "replace"), 400, error)
+            self.send_json(400, error)
+            return
+
+        # 2026-07-28 is stateless and single-shot; a client may accept only
+        # application/json. Legacy (2025) still requires both media types.
+        accept = self.headers.get("Accept", "")
+        if request_era(payload, self.headers) == "2026":
+            if "application/json" not in accept and "*/*" not in accept:
+                record_exchange("POST", path, self.headers, payload, 400,
+                                {"error": "Invalid Accept header. Expected APPLICATION_JSON"})
+                self.send_text(400, "Invalid Accept header. Expected APPLICATION_JSON")
+                return
+        elif "application/json" not in accept or "text/event-stream" not in accept:
+            self.send_text(400, "Invalid Accept headers. Expected TEXT_EVENT_STREAM and APPLICATION_JSON")
             return
 
         try:
@@ -2890,7 +3758,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.handle_pre_json_rpc_config(config, payload.get("method")):
             return
 
-        status, extra_headers, response = handle_json_rpc(payload, config=config)
+        status, extra_headers, response = handle_json_rpc(
+            payload, config=config, headers=dict(self.headers)
+        )
+        record_exchange("POST", path, self.headers, payload, status, response)
         if response is None:
             self.send_response(status)
             self.send_cors_headers()
@@ -2948,6 +3819,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_405(self) -> None:
+        # 2026-07-28 stateless transport: only POST /mcp is allowed.
+        body = b"Method Not Allowed"
+        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+        self.send_cors_headers()
+        self.send_header("Allow", "POST, OPTIONS")
+        self.send_header("Content-Type", "text/plain;charset=UTF-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
