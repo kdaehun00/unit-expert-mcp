@@ -1498,7 +1498,7 @@ _INSPECT_PAGE = """<!doctype html>
   <main>
     <div class="console">
       <h2>▶ 요청 보내기</h2>
-      <p class="hint">MCP 요청을 직접 조립해서 보냅니다. (브라우저 fetch — SDK와 동일한 wire) 대상 URL을 시나리오 URL(<code>?cfg=…</code>)로 바꾸면 그 설정으로 응답합니다.</p>
+      <p class="hint">MCP 요청을 직접 조립해서 보냅니다. (브라우저 raw fetch) 대상 URL을 시나리오 URL(<code>?cfg=…</code>)로 바꾸면 그 설정으로 응답합니다.</p>
       <div class="console-row">
         <div class="field-c url-field">
           <label>대상 URL</label>
@@ -1551,6 +1551,10 @@ _INSPECT_PAGE = """<!doctype html>
       </div>
       <div class="console-row">
         <button class="send-btn" id="sendBtn" type="button">보내기</button>
+        <label class="toggle">
+          <input type="checkbox" id="clientCacheEnabled" style="vertical-align:middle">
+          tools/list ttlMs 클라이언트 캐시
+        </label>
         <p class="call-note" id="callNote"></p>
       </div>
     </div>
@@ -1583,6 +1587,8 @@ _INSPECT_PAGE = """<!doctype html>
     const hdrBox = document.getElementById("hdrBox");
     const bodyBox = document.getElementById("bodyBox");
     const cUrl = document.getElementById("cUrl");
+    const clientCacheEnabled = document.getElementById("clientCacheEnabled");
+    const clientCache = new Map();
 
     CONVERT_TOOLS.forEach((name) => {
       const opt = document.createElement("option");
@@ -1659,11 +1665,33 @@ _INSPECT_PAGE = """<!doctype html>
       return headers;
     }
 
+    function normalizedCacheKey(target, headers, payload) {
+      const method = payload && payload.method;
+      if (method !== "tools/list") return "";
+      const params = payload.params && typeof payload.params === "object"
+        ? JSON.parse(JSON.stringify(payload.params))
+        : {};
+      return JSON.stringify({
+        target,
+        protocolVersion: headers["MCP-Protocol-Version"] || headers["mcp-protocol-version"] || "",
+        method,
+        params
+      });
+    }
+
+    function readJson(text) {
+      try { return JSON.parse(text); } catch (e) { return null; }
+    }
+
     async function sendRequest() {
       // Send whatever is in the boxes, verbatim — no correction, no validation.
       const headers = parseHeaders(hdrBox.value);
       const rawBody = bodyBox.value;
       const target = cUrl.value.trim() || "/mcp";
+      const parsedBody = readJson(rawBody);
+      const cacheKey = clientCacheEnabled.checked
+        ? normalizedCacheKey(target, headers, parsedBody)
+        : "";
       // The inspect log only captures requests to *this* server. A same-origin
       // path (/mcp, /mcp?cfg=…) is logged; a cross-origin absolute URL is sent
       // but won't appear below (and may be blocked by CORS).
@@ -1674,10 +1702,37 @@ _INSPECT_PAGE = """<!doctype html>
       sendBtn.textContent = "전송 중…";
       callNote.textContent = "";
       try {
+        if (cacheKey) {
+          const cached = clientCache.get(cacheKey);
+          if (cached && cached.expiresAt > Date.now()) {
+            callNote.textContent = `CLIENT CACHE HIT · 서버 요청 생략 · ttl 남음 ${Math.ceil((cached.expiresAt - Date.now()) / 1000)}초`;
+            return;
+          }
+          clientCache.delete(cacheKey);
+        }
         const res = await fetch(target, { method: "POST", headers, body: rawBody });
-        callNote.textContent = sameOrigin
-          ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨`
-          : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다`;
+        const responseText = await res.text();
+        const responseJson = readJson(responseText);
+        if (cacheKey && res.ok && responseJson && responseJson.result) {
+          const ttlMs = Number(responseJson.result.ttlMs || 0);
+          if (ttlMs > 0) {
+            clientCache.set(cacheKey, {
+              expiresAt: Date.now() + ttlMs,
+              response: responseJson
+            });
+            callNote.textContent = sameOrigin
+              ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨 · tools/list ${ttlMs}ms 캐시 저장`
+              : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다 · tools/list ${ttlMs}ms 캐시 저장`;
+          } else {
+            callNote.textContent = sameOrigin
+              ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨 · ttlMs ${ttlMs}`
+              : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다 · ttlMs ${ttlMs}`;
+          }
+        } else {
+          callNote.textContent = sameOrigin
+            ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨`
+            : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다`;
+        }
         lastSignature = "";        // force re-render on next poll
         poll();
       } catch (e) {
@@ -3724,6 +3779,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         document.querySelectorAll(".era-2025-only input[type=checkbox]").forEach((input) => {{
           input.checked = false;
         }});
+        const cacheInput = document.getElementById("toolsListCacheEnabled");
+        if (cacheInput && !opts.silent) {{
+          cacheInput.checked = true;
+          syncToolsListCacheHint();
+        }}
       }} else {{
         // Symmetrically, clear 2026-only toggles when returning to 2025.
         document.querySelectorAll(".era-2026-only input[type=checkbox]").forEach((input) => {{
