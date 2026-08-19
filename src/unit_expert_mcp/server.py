@@ -31,6 +31,9 @@ META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
 META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
 META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+META_SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId"
+SUBSCRIPTIONS_LISTEN_METHOD = "subscriptions/listen"
+SUBSCRIPTIONS_ACKNOWLEDGED_METHOD = "notifications/subscriptions/acknowledged"
 # MCP-defined JSON-RPC error codes introduced in 2026-07-28.
 ERR_HEADER_MISMATCH = -32020
 ERR_MISSING_CAPABILITY = -32021
@@ -317,6 +320,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "mode": "normal",
         "tooManyCount": 21,
         "duplicateToolName": False,
+        "cacheTtlMs": 0,
+        "cacheScope": "private",
     },
     "toolErrors": [],
 }
@@ -665,6 +670,14 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
     config["toolsList"]["duplicateToolName"] = (
         mode in {"normal", "too-many"} and bool(tools_list.get("duplicateToolName", False))
     )
+    cache_ttl_ms = int(tools_list.get("cacheTtlMs", config["toolsList"]["cacheTtlMs"]))
+    if cache_ttl_ms < 0 or cache_ttl_ms > 3_600_000:
+        raise ValueError("toolsList.cacheTtlMs must be between 0 and 3600000")
+    cache_scope = str(tools_list.get("cacheScope", config["toolsList"]["cacheScope"])).strip()
+    if cache_scope not in {"private", "public"}:
+        raise ValueError("toolsList.cacheScope must be private or public")
+    config["toolsList"]["cacheTtlMs"] = cache_ttl_ms
+    config["toolsList"]["cacheScope"] = cache_scope
 
     raw_tool_errors = raw_config.get("toolErrors", [])
     if not isinstance(raw_tool_errors, list):
@@ -1030,6 +1043,47 @@ def json_rpc_result_2026(request_id: Any, result: dict[str, Any]) -> dict[str, A
     return {"jsonrpc": "2.0", "id": request_id, "result": enriched}
 
 
+def validate_subscriptions_listen(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate the 2026 subscriptions/listen request body."""
+    request_id = payload.get("id")
+    if "id" not in payload:
+        return json_rpc_error(None, -32600, "subscriptions/listen must be a JSON-RPC request")
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return json_rpc_error(request_id, ERR_INVALID_PARAMS, "Missing params")
+    notifications = params.get("notifications")
+    if not isinstance(notifications, dict):
+        return json_rpc_error(request_id, ERR_INVALID_PARAMS, "Missing params.notifications")
+    return None
+
+
+def accepted_subscription_notifications(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the subset of requested notification streams this server supports."""
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    requested = params.get("notifications") if isinstance(params.get("notifications"), dict) else {}
+    accepted: dict[str, Any] = {}
+    if requested.get("toolsListChanged") is True:
+        accepted["toolsListChanged"] = True
+    return accepted
+
+
+def subscriptions_acknowledged_notification(payload: dict[str, Any]) -> dict[str, Any]:
+    request_id = payload.get("id")
+    return {
+        "jsonrpc": "2.0",
+        "method": SUBSCRIPTIONS_ACKNOWLEDGED_METHOD,
+        "params": {
+            "notifications": accepted_subscription_notifications(payload),
+            "_meta": {META_SUBSCRIPTION_ID: request_id},
+        },
+    }
+
+
+def subscriptions_listen_result(request_id: Any) -> dict[str, Any]:
+    return json_rpc_result_2026(request_id, {"_meta": {META_SUBSCRIPTION_ID: request_id}})
+
+
 def handle_json_rpc(
     payload: Any,
     scenario: str = "ok",
@@ -1152,13 +1206,19 @@ def handle_json_rpc_2026(
         scenario_tools = tools_for_config(config)
         result = dict(scenario_tools or {"tools": tools(config["mcp"]["serviceName"])})
         # 2026 cacheable-list hints are required fields on ListToolsResult.
-        result.setdefault("ttlMs", 0)
-        result.setdefault("cacheScope", "private")
+        result.setdefault("ttlMs", config["toolsList"]["cacheTtlMs"])
+        result.setdefault("cacheScope", config["toolsList"]["cacheScope"])
         return 200, {}, json_rpc_result_2026(request_id, result)
 
     if method == "tools/call":
         result = call_tool(payload.get("params"))
         return 200, {}, json_rpc_result_2026(request_id, result)
+
+    if method == SUBSCRIPTIONS_LISTEN_METHOD:
+        error = validate_subscriptions_listen(payload)
+        if error is not None:
+            return 400, {}, error
+        return 200, {}, subscriptions_listen_result(request_id)
 
     return 200, {}, json_rpc_error(request_id, -32601, f"Method not found: {method}")
 
@@ -3088,6 +3148,23 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
                 <p class="hint-desc">2026 전송 마커(_meta·Mcp-Method)가 없는 요청은 모두 거부됩니다. 최신 버전을 아직 지원하지 않는 클라이언트가 실제로 실패하는지 확인할 때 사용합니다.</p>
               </div>
             </div>
+            <div class="sidebar-custom-header-row era-2026-only" id="toolsListCacheRow">
+              <div class="sidebar-custom-header-label">
+                <span class="field-title">
+                  tools/list 캐시 힌트
+                  <span class="field-hint">2026 tools/list 응답에 ttlMs 60000을 내려 클라이언트 캐시 동작을 확인합니다.</span>
+                </span>
+                <label class="custom-header-toggle">
+                  <input type="checkbox" id="toolsListCacheEnabled">
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                </label>
+              </div>
+              <div id="toolsListCacheHint" class="custom-header-hint" hidden>
+                <span class="hint-label">응답 필드</span>
+                <code>ttlMs: 60000, cacheScope: private</code>
+                <p class="hint-desc">같은 클라이언트 인스턴스가 60초 안에 tools/list를 다시 호출하면 SDK 캐시에서 반환될 수 있습니다.</p>
+              </div>
+            </div>
           </div>
           <dl class="summary-list">
             <div class="summary-item">
@@ -3329,6 +3406,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         rejectLegacyEl.checked = !!config.rejectLegacy;
         syncRejectLegacyHint();
       }}
+      const toolsListCacheEl = document.getElementById("toolsListCacheEnabled");
+      if (toolsListCacheEl) {{
+        toolsListCacheEl.checked = !!(config.toolsList && config.toolsList.cacheTtlMs > 0);
+        syncToolsListCacheHint();
+      }}
       syncEnabledStates(config);
       updateSummary(config, false);
     }}
@@ -3365,7 +3447,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         toolsList: {{
           mode,
           tooManyCount: 21,
-          duplicateToolName
+          duplicateToolName,
+          cacheTtlMs: currentEra === "2026" && document.getElementById("toolsListCacheEnabled").checked
+            ? 60000
+            : 0,
+          cacheScope: "private"
         }},
         customHeader: {{
           enabled: document.getElementById("customHeaderEnabled").checked,
@@ -3393,6 +3479,16 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     document.getElementById("rejectLegacyEnabled").addEventListener("change", () => {{
       syncRejectLegacyHint();
+      handleControlChange();
+    }});
+
+    function syncToolsListCacheHint() {{
+      const enabled = document.getElementById("toolsListCacheEnabled").checked;
+      document.getElementById("toolsListCacheHint").hidden = !enabled;
+    }}
+
+    document.getElementById("toolsListCacheEnabled").addEventListener("change", () => {{
+      syncToolsListCacheHint();
       handleControlChange();
     }});
 
@@ -3463,6 +3559,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       }}
       if (config.toolsList.duplicateToolName) {{
         parts.push(titleForToolError("duplicate-tool-name"));
+      }}
+      if (config.toolsList.cacheTtlMs > 0) {{
+        parts.push(`tools/list cache ${{config.toolsList.cacheTtlMs}}ms`);
       }}
       for (const error of config.toolErrors) {{
         parts.push(titleForToolError(error));
@@ -3631,6 +3730,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           input.checked = false;
         }});
         syncRejectLegacyHint();
+        syncToolsListCacheHint();
       }}
       if (opts.silent) return;
       // Switching era invalidates 2025-only selections; recollect and re-apply.
@@ -3801,8 +3901,22 @@ class Handler(BaseHTTPRequestHandler):
         # 2026-07-28 is stateless and single-shot; a client may accept only
         # application/json. Legacy (2025) still requires both media types.
         accept = self.headers.get("Accept", "")
-        if request_era(payload, self.headers) == "2026":
-            if "application/json" not in accept and "*/*" not in accept:
+        era = request_era(payload, self.headers)
+        rpc_method = payload.get("method") if isinstance(payload, dict) else None
+        if era == "2026":
+            if rpc_method == SUBSCRIPTIONS_LISTEN_METHOD:
+                if "text/event-stream" not in accept and "*/*" not in accept:
+                    record_exchange(
+                        "POST",
+                        path,
+                        self.headers,
+                        payload,
+                        400,
+                        {"error": "Invalid Accept header. Expected TEXT_EVENT_STREAM"},
+                    )
+                    self.send_text(400, "Invalid Accept header. Expected TEXT_EVENT_STREAM")
+                    return
+            elif "application/json" not in accept and "*/*" not in accept:
                 record_exchange("POST", path, self.headers, payload, 400,
                                 {"error": "Invalid Accept header. Expected APPLICATION_JSON"})
                 self.send_text(400, "Invalid Accept header. Expected APPLICATION_JSON")
@@ -3817,6 +3931,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(400, str(error))
             return
         if self.handle_pre_json_rpc_config(config, payload.get("method")):
+            return
+
+        if era == "2026" and rpc_method == SUBSCRIPTIONS_LISTEN_METHOD:
+            error = validate_2026_request(payload, dict(self.headers))
+            if error is None:
+                error = validate_subscriptions_listen(payload)
+            if error is not None:
+                record_exchange("POST", path, self.headers, payload, 400, error)
+                self.send_json(400, error)
+                return
+            messages = [
+                subscriptions_acknowledged_notification(payload),
+                subscriptions_listen_result(payload.get("id")),
+            ]
+            record_exchange("POST", path, self.headers, payload, 200, {"events": messages})
+            self.send_sse_json_rpc(200, messages)
             return
 
         status, extra_headers, response = handle_json_rpc(
@@ -3882,6 +4012,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def send_sse_json_rpc(
+        self,
+        status: int,
+        messages: list[dict[str, Any]],
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_cors_headers()
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        for message in messages:
+            data = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+            self.wfile.write(f"event: message\ndata: {data}\n\n".encode("utf-8"))
+        self.wfile.flush()
+        self.close_connection = True
 
     def send_405(self) -> None:
         # 2026-07-28 stateless transport: only POST /mcp is allowed.

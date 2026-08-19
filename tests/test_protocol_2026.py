@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import io
+import json
 import unittest
 
 from unit_expert_mcp.server import (
+    Handler,
+    META_SUBSCRIPTION_ID,
     PROTOCOL_VERSION_2026,
     SERVER_NAME,
     SERVER_VERSION,
+    SUBSCRIPTIONS_ACKNOWLEDGED_METHOD,
     handle_json_rpc,
+    subscriptions_acknowledged_notification,
 )
 
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
@@ -66,6 +72,29 @@ class Protocol2026Test(unittest.TestCase):
         self.assertEqual(payload["result"]["resultType"], "complete")
         self.assertEqual(len(payload["result"]["tools"]), 6)
         self.assertIn(META_SERVER, payload["result"]["_meta"])
+
+    def test_tools_list_can_advertise_positive_cache_ttl(self) -> None:
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/list",
+                "params": {"_meta": meta()},
+            },
+            config={
+                "protocolEra": "2026",
+                "toolsList": {
+                    "cacheTtlMs": 60000,
+                    "cacheScope": "private",
+                },
+            },
+            headers=headers("tools/list"),
+        )
+
+        self.assertEqual(status, 200)
+        assert payload is not None
+        self.assertEqual(payload["result"]["ttlMs"], 60000)
+        self.assertEqual(payload["result"]["cacheScope"], "private")
 
     def test_tools_call_executes_with_name_header(self) -> None:
         status, _, payload = handle_json_rpc(
@@ -185,6 +214,85 @@ class Protocol2026Test(unittest.TestCase):
         self.assertIn("Mcp-Session-Id", response_headers)
         assert payload is not None
         self.assertNotIn("resultType", payload["result"])
+
+    def test_subscriptions_listen_requires_notifications_filter(self) -> None:
+        status, _, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": "sub-1",
+                "method": "subscriptions/listen",
+                "params": {"_meta": meta()},
+            },
+            headers=headers("subscriptions/listen"),
+        )
+
+        self.assertEqual(status, 400)
+        assert payload is not None
+        self.assertEqual(payload["error"]["code"], -32602)
+
+    def test_subscriptions_listen_sends_acknowledged_sse_first(self) -> None:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "sub-1",
+            "method": "subscriptions/listen",
+            "params": {
+                "notifications": {
+                    "toolsListChanged": True,
+                    "promptsListChanged": True,
+                },
+                "_meta": meta(),
+            },
+        }
+        status, _, final_payload = handle_json_rpc(
+            payload,
+            headers=headers("subscriptions/listen"),
+        )
+        self.assertEqual(status, 200)
+        assert final_payload is not None
+
+        class FakeHandler:
+            headers: dict[str, str] = {}
+            wfile = io.BytesIO()
+            close_connection = False
+            sent_headers: dict[str, str] = {}
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_cors_headers(self) -> None:
+                pass
+
+            def send_header(self, name: str, value: str) -> None:
+                self.sent_headers[name] = value
+
+            def end_headers(self) -> None:
+                pass
+
+        fake = FakeHandler()
+        Handler.send_sse_json_rpc(
+            fake,
+            200,
+            [
+                subscriptions_acknowledged_notification(payload),
+                final_payload,
+            ],
+        )
+        body = fake.wfile.getvalue().decode("utf-8")
+
+        self.assertEqual(fake.status, 200)
+        self.assertEqual(fake.sent_headers["Content-Type"], "text/event-stream")
+        self.assertIs(fake.close_connection, True)
+        data_lines = [line[6:] for line in body.splitlines() if line.startswith("data: ")]
+        self.assertGreaterEqual(len(data_lines), 2)
+        ack = json.loads(data_lines[0])
+        final_result = json.loads(data_lines[1])
+
+        self.assertEqual(ack["method"], SUBSCRIPTIONS_ACKNOWLEDGED_METHOD)
+        self.assertEqual(ack["params"]["notifications"], {"toolsListChanged": True})
+        self.assertEqual(ack["params"]["_meta"][META_SUBSCRIPTION_ID], "sub-1")
+        self.assertEqual(final_result["id"], "sub-1")
+        self.assertEqual(final_result["result"]["resultType"], "complete")
+        self.assertEqual(final_result["result"]["_meta"][META_SUBSCRIPTION_ID], "sub-1")
 
 
 if __name__ == "__main__":

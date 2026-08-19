@@ -8,6 +8,8 @@
       <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/CSQAg9M8fJ4AGQUXfvz4y/mcp" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/anyio/4.13.0-py3-none-any" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/RI5PzIbPuVOz3KyZOU98V" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/pyjwt/2.13.0-py3-none-any" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
