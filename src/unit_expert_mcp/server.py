@@ -994,10 +994,14 @@ def validate_2026_request(
             f"Supported: {', '.join(SUPPORTED_PROTOCOL_VERSIONS)}",
         )
 
-    # clientCapabilities is a required envelope field.
+    # clientCapabilities is a required envelope field. If the field itself is
+    # missing, the request is malformed; -32021 is reserved for a present
+    # declaration that lacks a capability required by the server.
     if META_CLIENT_CAPABILITIES not in meta:
         return json_rpc_error(
-            request_id, ERR_INVALID_PARAMS, f"Missing _meta '{META_CLIENT_CAPABILITIES}'"
+            request_id,
+            ERR_INVALID_PARAMS,
+            f"Missing _meta '{META_CLIENT_CAPABILITIES}'",
         )
 
     # Mcp-Method header is required and must match body method.
@@ -1368,8 +1372,16 @@ def json_rpc_result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
-def json_rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+def json_rpc_error(
+    request_id: Any,
+    code: int,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
 def scenario_group_label(scenario: str) -> str:

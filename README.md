@@ -106,6 +106,35 @@ curl -i -X POST http://localhost:8000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
 ```
 
+## Official SDK 2026 Baseline
+
+The existing `unit_expert_mcp.server` implementation is the fault-injection
+server used for 2025/legacy and intentionally invalid scenarios. For a clean
+2026-07-28 baseline backed by the official MCP Python SDK, run the separate
+entrypoint:
+
+```bash
+pip install ".[sdk2026]"
+PYTHONPATH=src PORT=8000 python -m unit_expert_mcp.sdk_2026_server
+```
+
+This starts a Streamable HTTP MCP endpoint at `/mcp` using the SDK's ASGI app.
+It exposes the same six Unit Expert tools, but does not implement the scenario
+UI or malformed-response cases.
+
+Expected Render endpoint:
+
+```text
+https://unit-expert-mcp-2026.onrender.com/mcp
+```
+
+Docker:
+
+```bash
+docker build -f Dockerfile.sdk2026 -t unit-expert-mcp-sdk2026 .
+docker run --rm -p 8000:8000 unit-expert-mcp-sdk2026
+```
+
 ## Test
 
 ```bash

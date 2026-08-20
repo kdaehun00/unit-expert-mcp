@@ -131,7 +131,7 @@ class Protocol2026Test(unittest.TestCase):
         assert payload is not None
         self.assertEqual(payload["error"]["code"], -32602)
 
-    def test_missing_client_capabilities_is_invalid_params(self) -> None:
+    def test_missing_client_capabilities_field_is_invalid_params(self) -> None:
         status, _, payload = handle_json_rpc(
             {
                 "jsonrpc": "2.0",

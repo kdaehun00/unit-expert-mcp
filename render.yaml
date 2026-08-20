@@ -4,3 +4,10 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /healthz
+
+  - type: web
+    name: unit-expert-mcp-2026
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.sdk2026
+    healthCheckPath: /healthz
