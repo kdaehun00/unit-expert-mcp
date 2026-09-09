@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import os
 import time
@@ -16,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import isfinite
 from threading import Lock
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 SERVER_NAME = "unitExpert"
 SERVER_VERSION = "1.0.0"
@@ -110,6 +112,240 @@ def record_exchange(
 def inspect_snapshot() -> list[dict[str, Any]]:
     with INSPECT_LOCK:
         return list(INSPECT_LOG)
+
+
+# ---------------------------------------------------------------------------
+# Mock OAuth 2.1 Authorization Server + Resource Server.
+#
+# This server issues its OWN tokens. The token represents OUR user (sub), minted
+# for the OAuth client that registered with us (client_id) — this is the correct
+# "the MCP owns its auth" shape, not "delegate to an external IdP as the AS".
+# Everything is in-memory: auth codes live for seconds, access tokens are
+# self-verifying HS256 JWTs so we never have to store them.
+# ---------------------------------------------------------------------------
+OAUTH_LOCK = Lock()
+# client_id -> registration metadata (redirect_uris, etc.).
+REGISTERED_CLIENTS: dict[str, dict[str, Any]] = {}
+# authorization code -> {client_id, redirect_uri, code_challenge, method, sub, exp}.
+AUTH_CODES: dict[str, dict[str, Any]] = {}
+
+# HS256 signing secret. A fixed default keeps the mock reproducible across
+# restarts; override with MCP_OAUTH_SECRET in real deployments.
+JWT_SECRET = os.getenv("MCP_OAUTH_SECRET", "unit-expert-mock-oauth-secret")
+ACCESS_TOKEN_TTL_SECONDS = 3600
+AUTH_CODE_TTL_SECONDS = 300
+# Fixed demo identity handed out by the one-click login. A real login layer
+# (including "sign in with Kakao" as one option) would resolve a real user here.
+DEMO_USER_SUB = "demo-user"
+OAUTH_SCOPE = "mcp"
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(text: str) -> bytes:
+    padding = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(f"{text}{padding}".encode("ascii"))
+
+
+def issue_access_token(claims: dict[str, Any], ttl_seconds: int = ACCESS_TOKEN_TTL_SECONDS) -> str:
+    """Mint a self-verifying HS256 JWT — no server-side storage required."""
+    header = {"alg": "HS256", "typ": "JWT"}
+    now = int(time.time())
+    payload = {**claims, "iat": now, "exp": now + ttl_seconds}
+    segments = [
+        _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+        _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
+    ]
+    signing_input = ".".join(segments).encode("ascii")
+    signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    segments.append(_b64url_encode(signature))
+    return ".".join(segments)
+
+
+def verify_access_token(token: str | None) -> dict[str, Any] | None:
+    """Return the JWT claims if signature + expiry are valid, else None."""
+    if not token:
+        return None
+    try:
+        header_segment, payload_segment, signature_segment = token.split(".")
+    except ValueError:
+        return None
+    signing_input = f"{header_segment}.{payload_segment}".encode("ascii")
+    expected = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    try:
+        actual = _b64url_decode(signature_segment)
+    except (binascii.Error, ValueError):
+        return None
+    if not hmac.compare_digest(actual, expected):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(payload_segment))
+    except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    return payload
+
+
+def bearer_token(headers: Any) -> str | None:
+    """Extract the token from an `Authorization: Bearer <token>` header."""
+    raw = headers.get("Authorization") or headers.get("authorization") or ""
+    parts = raw.split(" ", 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
+        return parts[1].strip()
+    return None
+
+
+def pkce_matches(verifier: str, challenge: str, method: str) -> bool:
+    """Validate a PKCE code_verifier against the stored challenge."""
+    if not challenge:
+        return True
+    if method == "S256":
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        return hmac.compare_digest(_b64url_encode(digest), challenge)
+    # "plain" (or unspecified) — direct comparison.
+    return hmac.compare_digest(verifier, challenge)
+
+
+def register_client(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Dynamic Client Registration (RFC 7591). Public client, no secret."""
+    client_id = f"mcp-client-{uuid.uuid4().hex}"
+    redirect_uris = metadata.get("redirect_uris")
+    if not isinstance(redirect_uris, list):
+        redirect_uris = []
+    record = {
+        "client_id": client_id,
+        "redirect_uris": [uri for uri in redirect_uris if isinstance(uri, str)],
+        "client_name": metadata.get("client_name"),
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+    }
+    with OAUTH_LOCK:
+        REGISTERED_CLIENTS[client_id] = record
+    return record
+
+
+def create_auth_code(entry: dict[str, Any]) -> str:
+    code = uuid.uuid4().hex
+    entry = {**entry, "exp": int(time.time()) + AUTH_CODE_TTL_SECONDS}
+    with OAUTH_LOCK:
+        AUTH_CODES[code] = entry
+    return code
+
+
+def consume_auth_code(code: str) -> dict[str, Any] | None:
+    """Single-use: pop the code and return it only if unexpired."""
+    with OAUTH_LOCK:
+        entry = AUTH_CODES.pop(code, None)
+    if entry is None:
+        return None
+    if int(entry.get("exp", 0)) < int(time.time()):
+        return None
+    return entry
+
+
+def _append_query(url: str, params: dict[str, str | None]) -> str:
+    """Append query parameters to a redirect URL, dropping None values."""
+    pairs = [(key, value) for key, value in params.items() if value is not None]
+    if not pairs:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{urlencode(pairs)}"
+
+
+def protected_resource_metadata(base_url: str) -> dict[str, Any]:
+    """RFC 9728 — advertises which Authorization Server protects /mcp."""
+    return {
+        "resource": f"{base_url}/mcp",
+        "authorization_servers": [base_url],
+        "scopes_supported": [OAUTH_SCOPE],
+        "bearer_methods_supported": ["header"],
+    }
+
+
+def authorization_server_metadata(base_url: str) -> dict[str, Any]:
+    """RFC 8414 — our own AS metadata (we issue the tokens)."""
+    return {
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/authorize",
+        "token_endpoint": f"{base_url}/token",
+        "registration_endpoint": f"{base_url}/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256", "plain"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": [OAUTH_SCOPE],
+    }
+
+
+def render_authorize_page(params: dict[str, str]) -> str:
+    """Minimal one-click demo login + third-party consent screen.
+
+    Real deployments would show a proper login (optionally "sign in with Kakao"
+    as one method) and persist the consent decision. For the mock, clicking
+    "로그인 후 동의" resolves the fixed demo user and mints an authorization code.
+    """
+    carried = (
+        "response_type",
+        "client_id",
+        "redirect_uri",
+        "state",
+        "scope",
+        "code_challenge",
+        "code_challenge_method",
+        "resource",
+    )
+    hidden = "\n".join(
+        f'<input type="hidden" name="{escape(key)}" value="{escape(params.get(key, ""))}">'
+        for key in carried
+    )
+    client_id = escape(params.get("client_id", "(unknown client)"))
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unit Expert 로그인</title>
+  <style>
+    body {{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background:#f6f7f9; color:#17201d; display:flex; min-height:100vh; align-items:center; justify-content:center; }}
+    .card {{ background:#fff; border:1px solid #d9e0dd; border-radius:12px; box-shadow:0 10px 30px rgba(20,34,30,.08);
+      width:min(420px, calc(100vw - 32px)); padding:28px; }}
+    h1 {{ font-size:20px; margin:0 0 4px; }}
+    .sub {{ color:#62706b; font-size:13px; margin-bottom:18px; }}
+    .client {{ font-size:12px; color:#62706b; background:#f1f5f4; border:1px solid #d9e0dd; border-radius:8px;
+      padding:10px 12px; margin-bottom:16px; word-break:break-all; }}
+    .consent {{ display:flex; gap:9px; align-items:flex-start; font-size:13px; line-height:1.5;
+      background:#f1f5f4; border:1px solid #d9e0dd; border-radius:8px; padding:12px; margin-bottom:16px; }}
+    .consent input {{ margin-top:3px; width:16px; height:16px; }}
+    button {{ width:100%; border:0; border-radius:8px; padding:12px; font-size:14px; font-weight:700; cursor:pointer; }}
+    .primary {{ background:#0f766e; color:#fff; }}
+    .primary:hover {{ background:#115e59; }}
+    .kakao {{ background:#fee500; color:#191600; margin-top:8px; }}
+    .note {{ color:#8a5a00; font-size:11px; margin-top:12px; }}
+  </style>
+</head>
+<body>
+  <form class="card" method="POST" action="/authorize">
+    {hidden}
+    <h1>Unit Expert 로그인</h1>
+    <div class="sub">아래 클라이언트가 접근 권한을 요청했습니다.</div>
+    <div class="client"><b>client_id</b><br>{client_id}</div>
+    <label class="consent">
+      <input type="checkbox" name="consent" value="1" checked>
+      <span>개인정보 제3자 제공에 동의합니다. (Unit Expert 계정 정보를 위 클라이언트에 제공)</span>
+    </label>
+    <button class="primary" type="submit" name="action" value="approve">로그인 후 동의하고 계속</button>
+    <button class="kakao" type="button" disabled>카카오로 로그인 (데모에서는 비활성)</button>
+    <p class="note">데모: 로그인은 고정 사용자(demo-user)로 처리됩니다. 카카오 로그인은 우리 로그인 계층의 한 옵션일 뿐, 인증서버 자체가 아닙니다.</p>
+  </form>
+</body>
+</html>"""
 
 SCENARIO_TITLES = {
     "ok": "정상 응답",
@@ -324,7 +560,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "cacheScope": "private",
     },
     "toolErrors": [],
+    # OAuth mock. This server acts as its OWN Authorization Server and issues its
+    # OWN tokens (for its own user, scoped to the registered client) — it does NOT
+    # delegate to an external IdP as the AS. Any external login (e.g. Kakao) would
+    # only be one option inside our /authorize login layer, never the AS itself.
+    #   off         -> no auth, everything public (default, unchanged behaviour).
+    #   oauth       -> whole /mcp is a protected resource; every request needs a
+    #                  valid bearer token, else 401 + WWW-Authenticate challenge.
+    #   mixed-oauth -> initialize/tools/list stay public (anonymous clients work);
+    #                  only tools/call for a protected tool needs a bearer token.
+    "auth": {
+        "mode": "off",
+        "protectedTools": [
+            "convert_length",
+            "convert_weight",
+            "convert_temperature",
+            "convert_area",
+            "convert_volume",
+        ],
+    },
 }
+
+# OAuth mode identifiers, reused by config validation and the control-page UI.
+AUTH_MODES = ("off", "oauth", "mixed-oauth")
 
 LENGTH_FACTORS = {
     "mm": 0.001,
@@ -693,6 +951,17 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
     raw_custom_header = raw_config.get("customHeader")
     if isinstance(raw_custom_header, dict):
         config["customHeader"]["enabled"] = bool(raw_custom_header.get("enabled", False))
+
+    raw_auth = raw_config.get("auth")
+    if isinstance(raw_auth, dict):
+        mode = str(raw_auth.get("mode", config["auth"]["mode"])).strip()
+        if mode not in AUTH_MODES:
+            raise ValueError(f"auth.mode must be one of {', '.join(AUTH_MODES)}")
+        config["auth"]["mode"] = mode
+        raw_protected = raw_auth.get("protectedTools")
+        if isinstance(raw_protected, list):
+            protected = [name for name in raw_protected if isinstance(name, str)]
+            config["auth"]["protectedTools"] = protected
 
     return config
 
@@ -1406,191 +1675,476 @@ _INSPECT_PAGE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Unit Expert MCP · Wire Inspector</title>
+  <title>Unit Expert MCP · Inspect</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-soft: #f1f5f4;
+      --text: #17201d;
+      --muted: #62706b;
+      --line: #d9e0dd;
+      --line-strong: #b8c4bf;
+      --accent: #0f766e;
+      --accent-strong: #115e59;
+      --accent-soft: #dff3ef;
+      --danger: #b42318;
+      --danger-soft: #fde7e4;
+      --warn: #8a5a00;
+      --warn-soft: #fff2cc;
+      --code-bg: #101818;
+      --code-text: #d9f2ed;
+      --shadow: 0 10px 30px rgba(20, 34, 30, 0.08);
+    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      background: #0f1420;
-      color: #e6e9ef;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.45;
     }
+    button, input, select, textarea { font: inherit; }
+    button {
+      border: 1px solid var(--line-strong);
+      background: #ffffff;
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent-strong); }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    .primary:hover { background: var(--accent-strong); color: #ffffff; }
+    .quiet { background: transparent; }
+    .small { padding: 6px 9px; font-size: 12px; }
     header {
-      position: sticky; top: 0; z-index: 10;
-      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(246, 247, 249, 0.96);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+    }
+    .topbar {
+      max-width: 1440px;
+      margin: 0 auto;
       padding: 14px 20px;
-      background: #161d2e;
-      border-bottom: 1px solid #2a3346;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
     }
-    header h1 { font-size: 16px; margin: 0; font-weight: 700; }
-    header .meta { color: #8b95a7; font-size: 12px; }
-    header .spacer { flex: 1; }
-    button, label.toggle {
-      font: inherit; font-size: 12px;
-      background: #223049; color: #cdd6e6; border: 1px solid #33415c;
-      border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    .title { display: flex; flex-direction: column; min-width: 0; }
+    h1 { margin: 0; font-size: 18px; line-height: 1.2; }
+    .subtitle { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .top-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .live-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 12px;
+      background: #ffffff;
+      cursor: pointer;
     }
-    button:hover { background: #2b3b57; }
-    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #3ddc84; display: inline-block; margin-right: 6px; }
-    .status-dot.paused { background: #f5a623; }
-    main { padding: 16px 20px 60px; display: flex; flex-direction: column; gap: 12px; }
-    .empty { color: #6b7488; padding: 40px; text-align: center; }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #14835b;
+      display: inline-block;
+    }
+    .status-dot.paused { background: #c88200; }
+    main {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 18px 20px 56px;
+      display: grid;
+      grid-template-columns: minmax(420px, 0.9fr) minmax(460px, 1.1fr);
+      gap: 16px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      min-width: 0;
+    }
+    .panel-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: space-between;
+    }
+    .panel-head h2 { margin: 0; font-size: 15px; }
+    .panel-body { padding: 16px; }
+    .verify { align-self: start; position: sticky; top: 82px; }
+    .stack { display: flex; flex-direction: column; gap: 14px; }
+    .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .field label, .editor-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    input, select, textarea {
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--text);
+      padding: 9px 10px;
+      min-width: 0;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: 2px solid var(--accent-soft);
+      border-color: var(--accent);
+    }
+    textarea {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      resize: vertical;
+      width: 100%;
+    }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .tool-fields { display: grid; grid-template-columns: 1.5fr 0.8fr 0.8fr 0.8fr; gap: 10px; }
+    .tool-fields.hidden { display: none; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .cache-control {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 11px 12px;
+      background: var(--panel-soft);
+    }
+    .cache-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .cache-copy strong { font-size: 13px; }
+    .cache-copy span { color: var(--muted); font-size: 12px; }
+    .switch { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; white-space: nowrap; }
+    .switch input { width: 16px; height: 16px; padding: 0; }
+    details.editor {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    details.editor > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 11px 12px;
+      font-weight: 700;
+      font-size: 13px;
+      background: var(--panel-soft);
+    }
+    details.editor > summary::-webkit-details-marker { display: none; }
+    .editor-body { padding: 12px; display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .result-box {
+      min-height: 170px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfc;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+    .result-title { font-weight: 750; font-size: 14px; }
+    .result-text { color: var(--muted); font-size: 13px; }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #ffffff;
+    }
+    .metric dt { color: var(--muted); font-size: 11px; font-weight: 700; margin: 0 0 5px; }
+    .metric dd { margin: 0; font-size: 18px; font-weight: 800; }
+    .status-line {
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--panel-soft);
+      color: var(--text);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .status-line.ok { background: #e1f5eb; color: #14532d; }
+    .status-line.err { background: var(--danger-soft); color: var(--danger); }
+    .status-line.warn { background: var(--warn-soft); color: var(--warn); }
+    .log-panel { grid-column: 1 / -1; }
+    .log-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .log-list { display: grid; gap: 8px; }
+    .empty {
+      border: 1px dashed var(--line-strong);
+      border-radius: 8px;
+      padding: 28px;
+      text-align: center;
+      color: var(--muted);
+      background: #fbfcfc;
+    }
     .row {
-      border: 1px solid #2a3346; border-radius: 12px; overflow: hidden;
-      background: #131a29;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      overflow: hidden;
     }
     .row-head {
-      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-      padding: 10px 14px; cursor: pointer; user-select: none;
+      display: grid;
+      grid-template-columns: 74px 72px minmax(150px, 1fr) 96px 76px;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      min-height: 50px;
     }
-    .row-head:hover { background: #182135; }
-    .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
-    .badge.era-2026 { background: #0e766e; color: #eafffb; }
-    .badge.era-2025 { background: #394a63; color: #cdd6e6; }
-    .badge.ok { background: #14532d; color: #d5f5e0; }
-    .badge.err { background: #5a1d1d; color: #ffd9d5; }
-    .method { font-weight: 700; color: #9ecbff; }
-    .time { color: #6b7488; font-size: 12px; }
-    .rid { color: #6b7488; font-size: 12px; }
-    .row-head .spacer { flex: 1; }
-    .row-body { display: none; border-top: 1px solid #2a3346; padding: 12px 14px; gap: 14px; }
-    .row.open .row-body { display: grid; grid-template-columns: 1fr 1fr; }
-    @media (max-width: 820px) { .row.open .row-body { grid-template-columns: 1fr; } }
-    .pane h3 { margin: 0 0 6px; font-size: 12px; color: #8b95a7; text-transform: uppercase; letter-spacing: 0.05em; }
-    pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; background: #0c1220; border: 1px solid #212a3d; border-radius: 8px; padding: 10px; }
-    .hdr-line { color: #b7c3d8; }
-    .hdr-line b { color: #9ecbff; font-weight: 600; }
-    .console {
-      border: 1px solid #2a3346; border-radius: 12px; background: #131a29;
-      padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;
+    .row:hover { border-color: var(--line-strong); }
+    .row-body {
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      border-top: 1px solid var(--line);
+      padding: 12px;
+      background: #fbfcfc;
     }
-    .console h2 { margin: 0; font-size: 14px; font-weight: 700; }
-    .console .hint { color: #8b95a7; font-size: 12px; margin: -4px 0 0; }
-    .console-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
-    .field-c { display: flex; flex-direction: column; gap: 4px; }
-    .field-c label { font-size: 11px; color: #8b95a7; text-transform: uppercase; letter-spacing: 0.04em; }
-    .console select, .console input {
-      font: inherit; font-size: 13px; background: #0c1220; color: #e6e9ef;
-      border: 1px solid #33415c; border-radius: 8px; padding: 7px 10px; min-width: 90px;
+    .row.open .row-body { display: grid; }
+    .time, .muted { color: var(--muted); font-size: 12px; }
+    .method {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 750;
+      overflow-wrap: anywhere;
     }
-    .console input.val { width: 90px; }
-    .console .url-field { flex: 1; min-width: 320px; }
-    .console .url-field input { width: 100%; }
-    .send-btn { background: #0e766e; color: #eafffb; border-color: #0e766e; font-weight: 700; padding: 8px 20px; }
-    .send-btn:hover { background: #109c91; }
-    .send-btn:disabled { opacity: 0.5; cursor: default; }
-    .console .arg-fields { display: contents; }
-    .console .arg-fields.hidden { display: none; }
-    .call-note { color: #6b7488; font-size: 12px; margin: 0; }
-    .console code { background: #223049; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
-    .reset-btn { background: #223049; color: #cdd6e6; border: 1px solid #33415c; font-weight: 600; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
-    .reset-btn:hover { background: #2b3b57; }
-    .editor-row { display: flex; gap: 12px; flex-wrap: wrap; }
-    .editor-col { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 260px; }
-    .editor-col label { font-size: 11px; color: #8b95a7; text-transform: uppercase; letter-spacing: 0.04em; }
-    .console textarea {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
-      background: #0c1120; color: #e6e9ef; border: 1px solid #33415c;
-      border-radius: 8px; padding: 8px 10px; resize: vertical; width: 100%;
+    .badge {
+      justify-self: start;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
     }
-    .console textarea:focus { outline: none; border-color: #0e766e; }
+    .era-2026 { background: var(--accent-soft); color: var(--accent-strong); }
+    .era-2025 { background: #eceff3; color: #3d4955; }
+    .ok { background: #e1f5eb; color: #14532d; }
+    .err { background: var(--danger-soft); color: var(--danger); }
+    .pane { min-width: 0; }
+    .pane h3 { margin: 0 0 7px; font-size: 12px; color: var(--muted); }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--code-text);
+      background: var(--code-bg);
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 460px;
+      overflow: auto;
+    }
+    .hdr-line { color: var(--code-text); }
+    .hdr-line b { color: #8ee8d3; }
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; }
+      .verify { position: static; }
+      .row-head { grid-template-columns: 62px 66px minmax(120px, 1fr) 82px 70px; }
+      .row-body { grid-template-columns: 1fr; }
+      .tool-fields, .grid-3 { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .top-actions { margin-left: 0; width: 100%; }
+      .top-actions button, .live-toggle { flex: 1; justify-content: center; }
+      main { padding: 12px; }
+      .grid-2, .metrics { grid-template-columns: 1fr; }
+      .row-head { grid-template-columns: 1fr 1fr; }
+      .row-head .method { grid-column: 1 / -1; }
+      .row-head .small { justify-self: stretch; }
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1>🔌 MCP Wire Inspector</h1>
-    <span class="meta" id="meta">최근 /mcp 요청·응답을 실시간으로 표시합니다.</span>
-    <span class="spacer"></span>
-    <label class="toggle"><span class="status-dot" id="dot"></span><span id="liveLabel">실시간</span> ·
-      <input type="checkbox" id="liveToggle" checked style="vertical-align:middle"></label>
-    <button id="clearBtn" type="button">화면 비우기</button>
-  </header>
-  <main>
-    <div class="console">
-      <h2>▶ 요청 보내기</h2>
-      <p class="hint">MCP 요청을 직접 조립해서 보냅니다. (브라우저 raw fetch) 대상 URL을 시나리오 URL(<code>?cfg=…</code>)로 바꾸면 그 설정으로 응답합니다.</p>
-      <div class="console-row">
-        <div class="field-c url-field">
-          <label>대상 URL</label>
-          <input id="cUrl" type="text" value="/mcp" spellcheck="false" placeholder="/mcp 또는 http://.../mcp?cfg=…">
-        </div>
+    <div class="topbar">
+      <div class="title">
+        <h1>MCP 요청 검사</h1>
+        <div class="subtitle" id="meta">최근 /mcp 요청을 표시합니다.</div>
       </div>
-      <div class="console-row">
-        <div class="field-c">
-          <label>메서드</label>
-          <select id="cMethod">
-            <option value="server/discover">server/discover</option>
-            <option value="tools/list">tools/list</option>
-            <option value="tools/call" selected>tools/call</option>
-            <option value="ping">ping</option>
-          </select>
-        </div>
-        <div class="field-c arg-fields" id="callFields">
-          <div class="field-c">
-            <label>도구 (tools/call)</label>
-            <select id="cTool"></select>
-          </div>
-          <div class="field-c" id="fVal">
-            <label>value</label>
-            <input class="val" id="cValue" type="number" value="1">
-          </div>
-          <div class="field-c" id="fFrom">
-            <label>from_unit</label>
-            <input class="val" id="cFrom" type="text" value="m">
-          </div>
-          <div class="field-c" id="fTo">
-            <label>to_unit</label>
-            <input class="val" id="cTo" type="text" value="cm">
-          </div>
-        </div>
-        <div class="field-c">
-          <label>&nbsp;</label>
-          <button class="reset-btn" id="fillBtn" type="button">↺ 컨트롤로 채우기</button>
-        </div>
-      </div>
-      <p class="hint">아래 헤더·본문을 직접 수정해서 보낼 수 있습니다. 예: <code>_meta</code>를 지우거나 헤더를 틀리게 바꿔 위반 응답(-32602/-32020/-32022)을 확인하세요. <b>보내기는 아래 내용을 그대로 전송</b>합니다.</p>
-      <div class="editor-row">
-        <div class="editor-col">
-          <label>헤더 (한 줄에 <code>Key: Value</code>)</label>
-          <textarea id="hdrBox" spellcheck="false" rows="5"></textarea>
-        </div>
-        <div class="editor-col">
-          <label>본문 (JSON — 그대로 전송, 깨진 JSON도 가능)</label>
-          <textarea id="bodyBox" spellcheck="false" rows="10"></textarea>
-        </div>
-      </div>
-      <div class="console-row">
-        <button class="send-btn" id="sendBtn" type="button">보내기</button>
-        <label class="toggle">
-          <input type="checkbox" id="clientCacheEnabled" style="vertical-align:middle">
-          tools/list ttlMs 클라이언트 캐시
+      <div class="top-actions">
+        <label class="live-toggle">
+          <span class="status-dot" id="dot"></span>
+          <span id="liveLabel">실시간</span>
+          <input type="checkbox" id="liveToggle" checked>
         </label>
-        <p class="call-note" id="callNote"></p>
+        <button id="refreshBtn" type="button">새로고침</button>
+        <button id="clearBtn" type="button">화면 비우기</button>
       </div>
     </div>
-    <div class="empty" id="empty">아직 기록된 요청이 없습니다. 위에서 요청을 보내거나, 외부 클라이언트가 이 서버의 /mcp로 요청하면 여기에 나타납니다.</div>
-    <div id="list"></div>
+  </header>
+  <main>
+    <section class="panel verify" aria-label="검증 실행">
+      <div class="panel-head">
+        <h2>검증 실행</h2>
+        <button class="quiet small" id="fillBtn" type="button">초기화</button>
+      </div>
+      <div class="panel-body stack">
+        <div class="field">
+          <label for="preset">검증 항목</label>
+          <select id="preset">
+            <option value="tools-list-cache">tools/list 캐시</option>
+            <option value="tools-list">tools/list 정상</option>
+            <option value="tools-call">tools/call 정상</option>
+            <option value="missing-meta-version">_meta protocolVersion 누락</option>
+            <option value="header-mismatch">Mcp-Method 헤더 불일치</option>
+            <option value="subscriptions-listen">subscriptions/listen ack</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cUrl">대상 URL</label>
+          <input id="cUrl" type="text" value="/mcp" spellcheck="false">
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="cMethod">메서드</label>
+            <select id="cMethod">
+              <option value="server/discover">server/discover</option>
+              <option value="tools/list">tools/list</option>
+              <option value="tools/call">tools/call</option>
+              <option value="subscriptions/listen">subscriptions/listen</option>
+              <option value="ping">ping</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="clientName">clientInfo.name</label>
+            <input id="clientName" type="text" value="inspect-console" spellcheck="false">
+          </div>
+        </div>
+        <div class="tool-fields" id="callFields">
+          <div class="field">
+            <label for="cTool">도구</label>
+            <select id="cTool"></select>
+          </div>
+          <div class="field" id="fVal">
+            <label for="cValue">value</label>
+            <input id="cValue" type="number" value="1">
+          </div>
+          <div class="field" id="fFrom">
+            <label for="cFrom">from</label>
+            <input id="cFrom" type="text" value="m">
+          </div>
+          <div class="field" id="fTo">
+            <label for="cTo">to</label>
+            <input id="cTo" type="text" value="cm">
+          </div>
+        </div>
+        <div class="cache-control">
+          <div class="cache-copy">
+            <strong>SDK 캐시 시뮬레이션</strong>
+            <span>tools/list 응답의 ttlMs가 양수일 때 두 번째 요청을 생략합니다.</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="clientCacheEnabled">
+            사용
+          </label>
+        </div>
+        <details class="editor">
+          <summary>요청 원문</summary>
+          <div class="editor-body">
+            <div class="field">
+              <span class="editor-title">헤더</span>
+              <textarea id="hdrBox" spellcheck="false" rows="6"></textarea>
+            </div>
+            <div class="field">
+              <span class="editor-title">본문</span>
+              <textarea id="bodyBox" spellcheck="false" rows="12"></textarea>
+            </div>
+          </div>
+        </details>
+        <div class="actions">
+          <button class="primary" id="sendBtn" type="button">1회 보내기</button>
+          <button id="sendTwiceBtn" type="button">2회 연속 보내기</button>
+        </div>
+        <div class="status-line" id="callNote">검증 항목을 선택하면 요청 원문이 채워집니다.</div>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="최근 결과">
+      <div class="panel-head">
+        <h2>최근 결과</h2>
+      </div>
+      <div class="panel-body">
+        <div class="result-box">
+          <div>
+            <div class="result-title" id="resultTitle">아직 실행 전</div>
+            <div class="result-text" id="resultText">요청을 보내면 HTTP 상태, 캐시 hit, 로그 반영 여부가 표시됩니다.</div>
+          </div>
+          <dl class="metrics">
+            <div class="metric">
+              <dt>실행</dt>
+              <dd id="metricRuns">0</dd>
+            </div>
+            <div class="metric">
+              <dt>서버 도달</dt>
+              <dd id="metricHits">0</dd>
+            </div>
+            <div class="metric">
+              <dt>캐시 hit</dt>
+              <dd id="metricCache">0</dd>
+            </div>
+          </dl>
+          <pre id="lastResponse">-</pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel log-panel" aria-label="요청 내역">
+      <div class="panel-head">
+        <h2>요청 내역</h2>
+        <div class="log-toolbar" id="logSummary">표시 0건</div>
+      </div>
+      <div class="panel-body">
+        <div class="empty" id="empty">아직 기록된 /mcp 요청이 없습니다.</div>
+        <div class="log-list" id="list"></div>
+      </div>
+    </section>
   </main>
   <script>
+    const CONVERT_TOOLS = __CONVERT_TOOLS__;
+    const protocolVersion2026 = "2026-07-28";
+    const cacheTarget = "/mcp?cfg=eyJwcm90b2NvbEVyYSI6IjIwMjYiLCJ0b29sc0xpc3QiOnsiY2FjaGVUdGxNcyI6NjAwMDB9fQ";
+
     const listEl = document.getElementById("list");
     const emptyEl = document.getElementById("empty");
     const metaEl = document.getElementById("meta");
+    const logSummary = document.getElementById("logSummary");
     const dotEl = document.getElementById("dot");
     const liveToggle = document.getElementById("liveToggle");
     const liveLabel = document.getElementById("liveLabel");
-    const openRows = new Set();
-    let hideBefore = 0;
-    let lastSignature = "";
-
-    // --- Request console -------------------------------------------------
-    const CONVERT_TOOLS = __CONVERT_TOOLS__;
-    const protocolVersion2026 = "2026-07-28";
+    const preset = document.getElementById("preset");
     const cMethod = document.getElementById("cMethod");
     const cTool = document.getElementById("cTool");
     const callFields = document.getElementById("callFields");
     const sendBtn = document.getElementById("sendBtn");
+    const sendTwiceBtn = document.getElementById("sendTwiceBtn");
     const fillBtn = document.getElementById("fillBtn");
     const callNote = document.getElementById("callNote");
     const cValue = document.getElementById("cValue");
@@ -1599,104 +2153,179 @@ _INSPECT_PAGE = """<!doctype html>
     const hdrBox = document.getElementById("hdrBox");
     const bodyBox = document.getElementById("bodyBox");
     const cUrl = document.getElementById("cUrl");
+    const clientName = document.getElementById("clientName");
     const clientCacheEnabled = document.getElementById("clientCacheEnabled");
+    const resultTitle = document.getElementById("resultTitle");
+    const resultText = document.getElementById("resultText");
+    const metricRuns = document.getElementById("metricRuns");
+    const metricHits = document.getElementById("metricHits");
+    const metricCache = document.getElementById("metricCache");
+    const lastResponse = document.getElementById("lastResponse");
+
+    const openRows = new Set();
     const clientCache = new Map();
+    let hideBefore = 0;
+    let lastSignature = "";
+    let runCount = 0;
+    let serverHitCount = 0;
+    let cacheHitCount = 0;
 
     CONVERT_TOOLS.forEach((name) => {
       const opt = document.createElement("option");
-      opt.value = name; opt.textContent = name;
+      opt.value = name;
+      opt.textContent = name;
       cTool.appendChild(opt);
     });
+    cTool.value = "convert_length";
 
-    function syncConsole() {
-      const isCall = cMethod.value === "tools/call";
-      callFields.classList.toggle("hidden", !isCall);
-      // list_supported_units takes no args → hide the value/unit inputs.
-      const needsArgs = isCall && cTool.value !== "list_supported_units";
-      document.getElementById("fVal").style.display = needsArgs ? "" : "none";
-      document.getElementById("fFrom").style.display = needsArgs ? "" : "none";
-      document.getElementById("fTo").style.display = needsArgs ? "" : "none";
-    }
-    cMethod.addEventListener("change", syncConsole);
-    cTool.addEventListener("change", syncConsole);
-
-    // Build a *correct* draft from the controls. The user can then freely
-    // edit the header/body boxes (delete _meta, break a header) before sending.
-    function buildDraft() {
-      const method = cMethod.value;
-      const meta = {
-        "io.modelcontextprotocol/protocolVersion": protocolVersion2026,
-        "io.modelcontextprotocol/clientCapabilities": {},
-        "io.modelcontextprotocol/clientInfo": { name: "inspect-console", version: "1.0" }
-      };
-      const params = { _meta: meta };
-      const headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "MCP-Protocol-Version": protocolVersion2026,
-        "Mcp-Method": method
-      };
-      if (method === "tools/call") {
-        const tool = cTool.value;
-        params.name = tool;
-        headers["Mcp-Name"] = tool;
-        if (tool === "list_supported_units") {
-          params.arguments = {};
-        } else {
-          params.arguments = {
-            value: Number(cValue.value),
-            from_unit: cFrom.value.trim(),
-            to_unit: cTo.value.trim()
-          };
-        }
-      }
-      const body = { jsonrpc: "2.0", id: 1, method, params };
-      return { headers, body };
+    function esc(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
     }
 
-    function fillFromControls() {
-      const { headers, body } = buildDraft();
-      hdrBox.value = Object.keys(headers).map((k) => `${k}: ${headers[k]}`).join("\\n");
-      bodyBox.value = JSON.stringify(body, null, 2);
-      callNote.textContent = "컨트롤 값으로 채웠습니다. 이제 자유롭게 수정 후 보내기.";
-    }
-    fillBtn.addEventListener("click", fillFromControls);
-
-    // Parse the header box verbatim: each non-empty line "Key: Value".
-    function parseHeaders(text) {
-      const headers = {};
-      text.split("\\n").forEach((line) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        const idx = trimmed.indexOf(":");
-        if (idx === -1) return;      // malformed line → skipped, on purpose
-        const key = trimmed.slice(0, idx).trim();
-        const value = trimmed.slice(idx + 1).trim();
-        if (key) headers[key] = value;
-      });
-      return headers;
+    function prettyRaw(value) {
+      if (typeof value === "string") return value;
+      try { return JSON.stringify(value, null, 2); } catch (e) { return String(value); }
     }
 
-    function normalizedCacheKey(target, headers, payload) {
-      const method = payload && payload.method;
-      if (method !== "tools/list") return "";
-      const params = payload.params && typeof payload.params === "object"
-        ? JSON.parse(JSON.stringify(payload.params))
-        : {};
-      return JSON.stringify({
-        target,
-        protocolVersion: headers["MCP-Protocol-Version"] || headers["mcp-protocol-version"] || "",
-        method,
-        params
-      });
+    function pretty(value) {
+      return esc(prettyRaw(value));
     }
 
     function readJson(text) {
       try { return JSON.parse(text); } catch (e) { return null; }
     }
 
+    function meta() {
+      return {
+        "io.modelcontextprotocol/protocolVersion": protocolVersion2026,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {
+          name: clientName.value.trim() || "inspect-console",
+          version: "1.0"
+        }
+      };
+    }
+
+    function bodyFor(method) {
+      const params = { _meta: meta() };
+      if (method === "tools/call") {
+        const tool = cTool.value;
+        params.name = tool;
+        params.arguments = tool === "list_supported_units"
+          ? {}
+          : {
+              value: Number(cValue.value),
+              from_unit: cFrom.value.trim(),
+              to_unit: cTo.value.trim()
+            };
+      }
+      if (method === "subscriptions/listen") {
+        params.notifications = { toolsListChanged: true };
+      }
+      return { jsonrpc: "2.0", id: 1, method, params };
+    }
+
+    function headersFor(method) {
+      const headers = {
+        "Content-Type": "application/json",
+        "Accept": method === "subscriptions/listen" ? "text/event-stream" : "application/json",
+        "MCP-Protocol-Version": protocolVersion2026,
+        "Mcp-Method": method
+      };
+      if (method === "tools/call") headers["Mcp-Name"] = cTool.value;
+      return headers;
+    }
+
+    function syncToolFields() {
+      const isCall = cMethod.value === "tools/call";
+      callFields.classList.toggle("hidden", !isCall);
+      const needsArgs = isCall && cTool.value !== "list_supported_units";
+      document.getElementById("fVal").style.display = needsArgs ? "" : "none";
+      document.getElementById("fFrom").style.display = needsArgs ? "" : "none";
+      document.getElementById("fTo").style.display = needsArgs ? "" : "none";
+    }
+
+    function writeDraft() {
+      const method = cMethod.value;
+      const headers = headersFor(method);
+      const body = bodyFor(method);
+      hdrBox.value = Object.keys(headers).map((k) => `${k}: ${headers[k]}`).join("\\n");
+      bodyBox.value = JSON.stringify(body, null, 2);
+      syncToolFields();
+    }
+
+    function applyPreset() {
+      const value = preset.value;
+      clientCacheEnabled.checked = value === "tools-list-cache";
+      cUrl.value = value === "tools-list-cache" ? cacheTarget : "/mcp";
+      if (value === "tools-call") cMethod.value = "tools/call";
+      else if (value === "subscriptions-listen") cMethod.value = "subscriptions/listen";
+      else cMethod.value = "tools/list";
+      writeDraft();
+      if (value === "missing-meta-version") {
+        const body = readJson(bodyBox.value);
+        if (body && body.params && body.params._meta) {
+          delete body.params._meta["io.modelcontextprotocol/protocolVersion"];
+          bodyBox.value = JSON.stringify(body, null, 2);
+        }
+      }
+      if (value === "header-mismatch") {
+        const headers = parseHeaders(hdrBox.value);
+        headers["Mcp-Method"] = "tools/call";
+        hdrBox.value = Object.keys(headers).map((k) => `${k}: ${headers[k]}`).join("\\n");
+      }
+      setNote("warn", "요청 원문이 갱신됐습니다.");
+    }
+
+    function parseHeaders(text) {
+      const headers = {};
+      text.split("\\n").forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        const index = trimmed.indexOf(":");
+        if (index === -1) return;
+        const key = trimmed.slice(0, index).trim();
+        const value = trimmed.slice(index + 1).trim();
+        if (key) headers[key] = value;
+      });
+      return headers;
+    }
+
+    function normalizedCacheKey(target, headers, payload) {
+      if (!payload || payload.method !== "tools/list") return "";
+      const params = payload.params && typeof payload.params === "object"
+        ? JSON.parse(JSON.stringify(payload.params))
+        : {};
+      return JSON.stringify({
+        target,
+        protocolVersion: headers["MCP-Protocol-Version"] || headers["mcp-protocol-version"] || "",
+        method: payload.method,
+        params
+      });
+    }
+
+    function setNote(kind, text) {
+      callNote.className = `status-line ${kind || ""}`.trim();
+      callNote.textContent = text;
+    }
+
+    function updateMetrics() {
+      metricRuns.textContent = String(runCount);
+      metricHits.textContent = String(serverHitCount);
+      metricCache.textContent = String(cacheHitCount);
+    }
+
+    function setResult(title, text, response) {
+      resultTitle.textContent = title;
+      resultText.textContent = text;
+      lastResponse.textContent = response === undefined ? "-" : prettyRaw(response);
+    }
+
     async function sendRequest() {
-      // Send whatever is in the boxes, verbatim — no correction, no validation.
       const headers = parseHeaders(hdrBox.value);
       const rawBody = bodyBox.value;
       const target = cUrl.value.trim() || "/mcp";
@@ -1704,140 +2333,162 @@ _INSPECT_PAGE = """<!doctype html>
       const cacheKey = clientCacheEnabled.checked
         ? normalizedCacheKey(target, headers, parsedBody)
         : "";
-      // The inspect log only captures requests to *this* server. A same-origin
-      // path (/mcp, /mcp?cfg=…) is logged; a cross-origin absolute URL is sent
-      // but won't appear below (and may be blocked by CORS).
-      const sameOrigin = target.startsWith("/") ||
-        target.startsWith(location.origin);
+      const sameOrigin = target.startsWith("/") || target.startsWith(location.origin);
+      runCount += 1;
+      updateMetrics();
+
+      if (cacheKey) {
+        const cached = clientCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+          cacheHitCount += 1;
+          updateMetrics();
+          const seconds = Math.ceil((cached.expiresAt - Date.now()) / 1000);
+          setNote("ok", `CLIENT CACHE HIT · 서버 요청 생략 · ttl 남음 ${seconds}초`);
+          setResult("클라이언트 캐시 hit", "두 번째 요청은 서버에 보내지 않았습니다.", cached.response);
+          return { sent: false, response: cached.response };
+        }
+        clientCache.delete(cacheKey);
+      }
+
+      serverHitCount += 1;
+      updateMetrics();
+      const res = await fetch(target, { method: "POST", headers, body: rawBody });
+      const text = await res.text();
+      const responseJson = readJson(text);
+      const response = responseJson || text;
+      const ttlMs = responseJson && responseJson.result ? Number(responseJson.result.ttlMs || 0) : 0;
+      if (cacheKey && res.ok && ttlMs > 0) {
+        clientCache.set(cacheKey, { expiresAt: Date.now() + ttlMs, response });
+      }
+      const label = sameOrigin ? "로그에 기록됨" : "외부 URL";
+      const cacheLabel = cacheKey ? ` · ttlMs ${ttlMs}` : "";
+      setNote(res.ok ? "ok" : "err", `HTTP ${res.status} · ${label}${cacheLabel}`);
+      setResult(`HTTP ${res.status}`, cacheKey && ttlMs > 0 ? `${ttlMs}ms 캐시 저장` : label, response);
+      lastSignature = "";
+      poll();
+      return { sent: true, response };
+    }
+
+    async function runSend(count) {
       sendBtn.disabled = true;
-      const prev = sendBtn.textContent;
-      sendBtn.textContent = "전송 중…";
-      callNote.textContent = "";
+      sendTwiceBtn.disabled = true;
       try {
-        if (cacheKey) {
-          const cached = clientCache.get(cacheKey);
-          if (cached && cached.expiresAt > Date.now()) {
-            callNote.textContent = `CLIENT CACHE HIT · 서버 요청 생략 · ttl 남음 ${Math.ceil((cached.expiresAt - Date.now()) / 1000)}초`;
-            return;
-          }
-          clientCache.delete(cacheKey);
+        for (let index = 0; index < count; index += 1) {
+          await sendRequest();
         }
-        const res = await fetch(target, { method: "POST", headers, body: rawBody });
-        const responseText = await res.text();
-        const responseJson = readJson(responseText);
-        if (cacheKey && res.ok && responseJson && responseJson.result) {
-          const ttlMs = Number(responseJson.result.ttlMs || 0);
-          if (ttlMs > 0) {
-            clientCache.set(cacheKey, {
-              expiresAt: Date.now() + ttlMs,
-              response: responseJson
-            });
-            callNote.textContent = sameOrigin
-              ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨 · tools/list ${ttlMs}ms 캐시 저장`
-              : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다 · tools/list ${ttlMs}ms 캐시 저장`;
-          } else {
-            callNote.textContent = sameOrigin
-              ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨 · ttlMs ${ttlMs}`
-              : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다 · ttlMs ${ttlMs}`;
-          }
-        } else {
-          callNote.textContent = sameOrigin
-            ? `HTTP ${res.status} · 아래 로그 최상단에 기록됨`
-            : `HTTP ${res.status} · 외부 URL이라 아래 로그에는 안 남습니다`;
-        }
-        lastSignature = "";        // force re-render on next poll
-        poll();
       } catch (e) {
-        callNote.textContent = "요청 실패: " + (e && e.message ? e.message : e) +
-          " (외부 URL이면 CORS 차단일 수 있음)";
+        setNote("err", "요청 실패: " + (e && e.message ? e.message : e));
+        setResult("요청 실패", "브라우저 또는 CORS에서 차단됐을 수 있습니다.", e && e.stack ? e.stack : String(e));
       } finally {
         sendBtn.disabled = false;
-        sendBtn.textContent = prev;
+        sendTwiceBtn.disabled = false;
       }
     }
-    sendBtn.addEventListener("click", sendRequest);
-    syncConsole();
-    fillFromControls();   // seed the boxes with a valid request on load
 
-    function esc(value) {
-      return String(value)
-        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    }
-    function pretty(value) {
-      if (typeof value === "string") return esc(value);
-      try { return esc(JSON.stringify(value, null, 2)); } catch (e) { return esc(String(value)); }
-    }
     function headerLines(headers) {
       const keys = Object.keys(headers || {});
       if (!keys.length) return "<span class=\\"hdr-line\\">(없음)</span>";
       return keys.map((k) => `<div class="hdr-line"><b>${esc(k)}</b>: ${esc(headers[k])}</div>`).join("");
     }
+
+    function statusText(exchange) {
+      const errorCode = exchange.responseBody && exchange.responseBody.error
+        ? exchange.responseBody.error.code
+        : null;
+      return errorCode === null || errorCode === undefined
+        ? String(exchange.status)
+        : `${exchange.status} / ${errorCode}`;
+    }
+
     function render(exchanges) {
       const visible = exchanges.filter((x) => x.seq > hideBefore);
       emptyEl.style.display = visible.length ? "none" : "block";
-      metaEl.textContent = `표시 ${visible.length}건 · 버퍼 ${exchanges.length}건 (최대 50)`;
+      logSummary.textContent = `표시 ${visible.length}건 · 버퍼 ${exchanges.length}건`;
+      metaEl.textContent = `최근 /mcp 요청 ${visible.length}건`;
       listEl.innerHTML = visible.map((x) => {
         const ok = x.status < 400;
         const open = openRows.has(x.seq) ? " open" : "";
-        const errCode = x.responseBody && x.responseBody.error ? x.responseBody.error.code : null;
-        const statusText = errCode !== null && errCode !== undefined ? `${x.status} · ${errCode}` : x.status;
         return `
-        <div class="row${open}" data-seq="${x.seq}">
+        <article class="row${open}" data-seq="${x.seq}">
           <div class="row-head">
             <span class="time">${esc(x.time)}</span>
-            <span class="badge era-${x.era === "2026" ? "2026" : "2025"}">${esc(x.era)}</span>
+            <span class="badge ${x.era === "2026" ? "era-2026" : "era-2025"}">${esc(x.era)}</span>
             <span class="method">${esc(x.method || x.httpMethod)}</span>
-            <span class="spacer"></span>
-            <span class="badge ${ok ? "ok" : "err"}">${esc(statusText)}</span>
+            <span class="badge ${ok ? "ok" : "err"}">${esc(statusText(x))}</span>
+            <button class="small detail-toggle" type="button">${open ? "닫기" : "상세"}</button>
           </div>
           <div class="row-body">
             <div class="pane">
-              <h3>요청 헤더</h3>
-              <pre>${headerLines(x.requestHeaders)}</pre>
-              <h3 style="margin-top:10px">요청 바디</h3>
-              <pre>${pretty(x.requestBody)}</pre>
+              <h3>요청</h3>
+              <pre>${headerLines(x.requestHeaders)}\\n\\n${pretty(x.requestBody)}</pre>
             </div>
             <div class="pane">
-              <h3>응답 (HTTP ${esc(x.status)})</h3>
+              <h3>응답</h3>
               <pre>${pretty(x.responseBody)}</pre>
             </div>
           </div>
-        </div>`;
+        </article>`;
       }).join("");
     }
+
     listEl.addEventListener("click", (event) => {
-      const row = event.target.closest(".row");
+      const button = event.target.closest(".detail-toggle");
+      if (!button) return;
+      const row = button.closest(".row");
       if (!row) return;
       const seq = Number(row.dataset.seq);
-      if (openRows.has(seq)) { openRows.delete(seq); row.classList.remove("open"); }
-      else { openRows.add(seq); row.classList.add("open"); }
+      if (openRows.has(seq)) openRows.delete(seq);
+      else openRows.add(seq);
+      row.classList.toggle("open", openRows.has(seq));
+      button.textContent = openRows.has(seq) ? "닫기" : "상세";
     });
+
     document.getElementById("clearBtn").addEventListener("click", () => {
-      // Client-side clear: hide everything currently buffered without touching the server.
       const rows = listEl.querySelectorAll(".row");
       let maxSeq = hideBefore;
-      rows.forEach((r) => { maxSeq = Math.max(maxSeq, Number(r.dataset.seq)); });
+      rows.forEach((row) => { maxSeq = Math.max(maxSeq, Number(row.dataset.seq)); });
       hideBefore = maxSeq;
       openRows.clear();
       lastSignature = "";
       poll();
     });
+
+    document.getElementById("refreshBtn").addEventListener("click", () => {
+      lastSignature = "";
+      poll();
+    });
+
     liveToggle.addEventListener("change", () => {
       dotEl.classList.toggle("paused", !liveToggle.checked);
       liveLabel.textContent = liveToggle.checked ? "실시간" : "일시정지";
     });
+    preset.addEventListener("change", applyPreset);
+    cMethod.addEventListener("change", writeDraft);
+    cTool.addEventListener("change", writeDraft);
+    [cValue, cFrom, cTo, clientName].forEach((input) => input.addEventListener("input", writeDraft));
+    fillBtn.addEventListener("click", applyPreset);
+    sendBtn.addEventListener("click", () => runSend(1));
+    sendTwiceBtn.addEventListener("click", () => runSend(2));
+
     async function poll() {
       try {
         const res = await fetch("/inspect/log", { cache: "no-store" });
         const data = await res.json();
         const exchanges = data.exchanges || [];
-        const signature = exchanges.length ? `${exchanges[0].seq}:${exchanges.length}:${hideBefore}` : `0:0:${hideBefore}`;
+        const signature = exchanges.length
+          ? `${exchanges[0].seq}:${exchanges.length}:${hideBefore}:${Array.from(openRows).join(",")}`
+          : `0:0:${hideBefore}`;
         if (signature !== lastSignature) {
           lastSignature = signature;
           render(exchanges);
         }
-      } catch (e) { /* keep polling */ }
+      } catch (e) {
+        metaEl.textContent = "로그를 가져오지 못했습니다.";
+      }
     }
+
+    applyPreset();
+    updateMetrics();
     setInterval(() => { if (liveToggle.checked) poll(); }, 1000);
     poll();
   </script>
@@ -3198,6 +3849,24 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
                 <p class="hint-desc">에러 시나리오와 별개로 동작합니다. 헤더가 없으면 401, 값이 틀리면 403을 반환합니다.</p>
               </div>
             </div>
+            <div class="sidebar-custom-header-row" id="authModeRow">
+              <div class="sidebar-custom-header-label">
+                <span class="field-title">
+                  OAuth 인증 모드
+                  <span class="field-hint">off=인증 없음, oauth=전체 보호, mixed-oauth=일부 툴만 보호(비로그인도 나머지 사용).</span>
+                </span>
+                <select id="authMode">
+                  <option value="off">off · 인증 없음</option>
+                  <option value="oauth">oauth · 전체 보호</option>
+                  <option value="mixed-oauth">mixed-oauth · 일부 툴만</option>
+                </select>
+              </div>
+              <div id="authModeHint" class="custom-header-hint" hidden>
+                <span class="hint-label">동작</span>
+                <code>401 + WWW-Authenticate: Bearer resource_metadata="…"</code>
+                <p class="hint-desc">자체 미니 AS(/authorize·/token·/register)가 토큰을 발급합니다. oauth는 모든 요청, mixed-oauth는 보호 툴 tools/call만 401을 반환합니다.</p>
+              </div>
+            </div>
             <div class="sidebar-custom-header-row era-2026-only" id="rejectLegacyRow">
               <div class="sidebar-custom-header-label">
                 <span class="field-title">
@@ -3468,6 +4137,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         customHeaderEl.checked = !!(config.customHeader && config.customHeader.enabled);
         syncCustomHeaderHint();
       }}
+      const authModeEl = document.getElementById("authMode");
+      if (authModeEl) {{
+        authModeEl.value = (config.auth && config.auth.mode) || "off";
+        syncAuthModeHint();
+      }}
       const rejectLegacyEl = document.getElementById("rejectLegacyEnabled");
       if (rejectLegacyEl) {{
         rejectLegacyEl.checked = !!config.rejectLegacy;
@@ -3525,6 +4199,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
           name: "X-Mock-Auth",
           value: "allow"
         }},
+        auth: {{
+          mode: document.getElementById("authMode").value
+        }},
         toolErrors
       }};
     }}
@@ -3536,6 +4213,16 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 
     document.getElementById("customHeaderEnabled").addEventListener("change", () => {{
       syncCustomHeaderHint();
+      handleControlChange();
+    }});
+
+    function syncAuthModeHint() {{
+      const mode = document.getElementById("authMode").value;
+      document.getElementById("authModeHint").hidden = mode === "off";
+    }}
+
+    document.getElementById("authMode").addEventListener("change", () => {{
+      syncAuthModeHint();
       handleControlChange();
     }});
 
@@ -3906,6 +4593,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"exchanges": inspect_snapshot()})
             return
 
+        if path == "/.well-known/oauth-protected-resource":
+            self.send_json(200, protected_resource_metadata(self.base_url()))
+            return
+
+        if path == "/.well-known/oauth-authorization-server":
+            self.send_json(200, authorization_server_metadata(self.base_url()))
+            return
+
+        if path == "/authorize":
+            self.handle_authorize_get()
+            return
+
         if path != "/mcp":
             self.send_text(404, "Not found")
             return
@@ -3922,6 +4621,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(400, str(error))
             return
         if self.handle_pre_json_rpc_config(config):
+            return
+        if self.enforce_auth(config, None, None):
             return
 
         accept = self.headers.get("Accept", "")
@@ -3953,6 +4654,18 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/scenario":
             self.handle_scenario_update()
+            return
+
+        if path == "/register":
+            self.handle_register()
+            return
+
+        if path == "/authorize":
+            self.handle_authorize_post()
+            return
+
+        if path == "/token":
+            self.handle_token()
             return
 
         if path != "/mcp":
@@ -4003,6 +4716,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(400, str(error))
             return
         if self.handle_pre_json_rpc_config(config, payload.get("method")):
+            return
+        if self.enforce_auth(config, payload.get("method"), payload):
+            record_exchange("POST", path, self.headers, payload, 401, {"error": "invalid_token"})
             return
 
         if era == "2026" and rpc_method == SUBSCRIPTIONS_LISTEN_METHOD:
@@ -4192,6 +4908,165 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(403, "Forbidden")
             return True
         return False
+
+    def base_url(self) -> str:
+        """Absolute origin of this server, honouring reverse-proxy headers."""
+        proto = self.headers.get("X-Forwarded-Proto")
+        if not proto:
+            proto = "https" if self.headers.get("X-Forwarded-Ssl") == "on" else "http"
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost"
+        return f"{proto}://{host}"
+
+    def read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        return self.rfile.read(length) if length > 0 else b""
+
+    def read_form(self) -> dict[str, str]:
+        raw = self.read_body()
+        return {key: value[0] for key, value in parse_qs(raw.decode("utf-8", "replace")).items()}
+
+    def enforce_auth(
+        self,
+        config: dict[str, Any],
+        method: str | None,
+        payload: Any,
+    ) -> bool:
+        """Send a 401 challenge and return True when the request lacks required auth.
+
+        off         -> never gates. oauth -> every /mcp request needs a token.
+        mixed-oauth -> only tools/call for a protected tool needs a token, so
+        anonymous clients can still initialize, list, and call public tools.
+        """
+        auth = config.get("auth", {})
+        mode = auth.get("mode", "off")
+        if mode == "off":
+            return False
+
+        needs_auth = False
+        if mode == "oauth":
+            needs_auth = True
+        elif mode == "mixed-oauth" and method == "tools/call":
+            params = payload.get("params") if isinstance(payload, dict) else None
+            name = params.get("name") if isinstance(params, dict) else None
+            needs_auth = name in auth.get("protectedTools", [])
+        if not needs_auth:
+            return False
+
+        if verify_access_token(bearer_token(self.headers)) is not None:
+            return False
+        self.send_auth_challenge()
+        return True
+
+    def send_auth_challenge(self) -> None:
+        resource_metadata = f"{self.base_url()}/.well-known/oauth-protected-resource"
+        body = json.dumps(
+            {
+                "error": "invalid_token",
+                "error_description": (
+                    "Authentication required. Obtain a bearer token from the "
+                    "authorization server, then retry with an Authorization header."
+                ),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.send_response(401)
+        self.send_cors_headers()
+        self.send_header("WWW-Authenticate", f'Bearer resource_metadata="{resource_metadata}"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_cors_headers()
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def handle_register(self) -> None:
+        try:
+            metadata = json.loads(self.read_body() or b"{}")
+        except json.JSONDecodeError:
+            self.send_json(400, {"error": "invalid_client_metadata"})
+            return
+        if not isinstance(metadata, dict):
+            metadata = {}
+        self.send_json(201, register_client(metadata))
+
+    def handle_authorize_get(self) -> None:
+        params = {key: value[0] for key, value in parse_qs(urlparse(self.path).query).items()}
+        self.send_html(200, render_authorize_page(params))
+
+    def handle_authorize_post(self) -> None:
+        form = self.read_form()
+        redirect_uri = form.get("redirect_uri", "")
+        state = form.get("state")
+        if not redirect_uri:
+            self.send_text(400, "Missing redirect_uri")
+            return
+        # A code is only issued once the user both logs in and consents.
+        if form.get("action") != "approve" or form.get("consent") != "1":
+            self.send_redirect(
+                _append_query(redirect_uri, {"error": "access_denied", "state": state})
+            )
+            return
+        code = create_auth_code(
+            {
+                "client_id": form.get("client_id", ""),
+                "redirect_uri": redirect_uri,
+                "code_challenge": form.get("code_challenge", ""),
+                "code_challenge_method": form.get("code_challenge_method", "plain"),
+                "scope": form.get("scope", OAUTH_SCOPE),
+                "sub": DEMO_USER_SUB,
+            }
+        )
+        self.send_redirect(_append_query(redirect_uri, {"code": code, "state": state}))
+
+    def handle_token(self) -> None:
+        form = self.read_form()
+        if form.get("grant_type") != "authorization_code":
+            self.send_json(400, {"error": "unsupported_grant_type"})
+            return
+        entry = consume_auth_code(form.get("code", ""))
+        if entry is None:
+            self.send_json(
+                400, {"error": "invalid_grant", "error_description": "Unknown or expired code"}
+            )
+            return
+        if form.get("redirect_uri", "") != entry["redirect_uri"]:
+            self.send_json(
+                400, {"error": "invalid_grant", "error_description": "redirect_uri mismatch"}
+            )
+            return
+        if not pkce_matches(
+            form.get("code_verifier", ""),
+            entry["code_challenge"],
+            entry["code_challenge_method"],
+        ):
+            self.send_json(
+                400, {"error": "invalid_grant", "error_description": "PKCE verification failed"}
+            )
+            return
+        base = self.base_url()
+        token = issue_access_token(
+            {
+                "iss": base,
+                "sub": entry["sub"],
+                "aud": f"{base}/mcp",
+                "client_id": entry["client_id"],
+                "scope": entry["scope"],
+            }
+        )
+        self.send_json(
+            200,
+            {
+                "access_token": token,
+                "token_type": "Bearer",
+                "expires_in": ACCESS_TOKEN_TTL_SECONDS,
+                "scope": entry["scope"],
+            },
+        )
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"{self.address_string()} - {format % args}")
