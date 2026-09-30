@@ -24,10 +24,15 @@ SERVER_NAME = "unitExpert"
 SERVER_VERSION = "1.0.0"
 SERVICE_NAME = "Unit Expert(단위전문가)"
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-03-26", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28")
-LATEST_PROTOCOL_VERSION = "2026-07-28"
 
 # 2026-07-28 stateless protocol constants.
 PROTOCOL_VERSION_2026 = "2026-07-28"
+# Versions reachable over the legacy (initialize handshake + session id) transport.
+# The legacy path must only ever negotiate one of these — see handle_json_rpc.
+LEGACY_PROTOCOL_VERSIONS = tuple(
+    version for version in SUPPORTED_PROTOCOL_VERSIONS if version != PROTOCOL_VERSION_2026
+)
+LATEST_LEGACY_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[-1]
 # Per-request _meta envelope keys (spec: basic/index#meta).
 META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
@@ -1213,11 +1218,19 @@ def request_era(payload: Any, headers: dict[str, str] | None = None) -> str:
     the server does not support must still be routed into the 2026 path so it
     gets -32022, rather than silently falling back to legacy. Legacy 2025 never
     sends ``Mcp-Method`` nor the ``_meta`` envelope, so it stays on the old path.
+
+    ``MCP-Protocol-Version`` is deliberately NOT a marker. Every 2025 client
+    echoes that header with the version it negotiated (and some advertise their
+    own newest instead), so treating the value ``2026-07-28`` as a marker drags
+    legacy-shaped requests onto a path whose ``_meta`` envelope they cannot
+    satisfy — a 400 with no way back, on every request including ``initialize``.
+    It could not serve the -32022 goal above either: it only matched the single
+    version the server *does* support, so that branch was unreachable through
+    it. The two markers left are ones only a 2026 client can produce. To refuse
+    legacy clients on purpose, use the ``rejectLegacy`` config flag.
     """
     lowered = {name.lower(): value for name, value in (headers or {}).items()}
     if "mcp-method" in lowered:
-        return "2026"
-    if str(lowered.get("mcp-protocol-version", "")).strip() == PROTOCOL_VERSION_2026:
         return "2026"
     if META_PROTOCOL_VERSION in request_meta(payload):
         return "2026"
@@ -1399,10 +1412,14 @@ def handle_json_rpc(
         SESSIONS.add(session_id)
         params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
         requested_version = params.get("protocolVersion")
+        # Fall back to the newest *legacy* version, never to 2026-07-28: reaching
+        # this handler means the client performed an initialize handshake, which
+        # the 2026 transport does not have. Answering "2026-07-28" would hand a
+        # stateful client a version it cannot speak.
         protocol_version = (
             requested_version
-            if requested_version in SUPPORTED_PROTOCOL_VERSIONS
-            else LATEST_PROTOCOL_VERSION
+            if requested_version in LEGACY_PROTOCOL_VERSIONS
+            else LATEST_LEGACY_PROTOCOL_VERSION
         )
         if config["initialize"]["protocolVersionEnabled"]:
             protocol_version = config["initialize"]["protocolVersion"]

@@ -6,12 +6,14 @@ import unittest
 
 from unit_expert_mcp.server import (
     Handler,
+    LEGACY_PROTOCOL_VERSIONS,
     META_SUBSCRIPTION_ID,
     PROTOCOL_VERSION_2026,
     SERVER_NAME,
     SERVER_VERSION,
     SUBSCRIPTIONS_ACKNOWLEDGED_METHOD,
     handle_json_rpc,
+    normalize_config,
     subscriptions_acknowledged_notification,
 )
 
@@ -214,6 +216,66 @@ class Protocol2026Test(unittest.TestCase):
         self.assertIn("Mcp-Session-Id", response_headers)
         assert payload is not None
         self.assertNotIn("resultType", payload["result"])
+
+    def test_version_header_alone_does_not_hijack_a_legacy_request(self) -> None:
+        # A 2025 client echoes MCP-Protocol-Version with whatever it negotiated
+        # (or its own newest). That header alone must not route a legacy-shaped
+        # request onto the 2026 path, where its missing _meta envelope would be
+        # an unrecoverable 400 on every request.
+        for method, params in (
+            ("initialize", {"protocolVersion": "2025-06-18"}),
+            ("tools/list", {}),
+            (
+                "tools/call",
+                {
+                    "name": "convert_length",
+                    "arguments": {"value": 1, "from_unit": "m", "to_unit": "cm"},
+                },
+            ),
+        ):
+            with self.subTest(method=method):
+                status, _, payload = handle_json_rpc(
+                    {"jsonrpc": "2.0", "id": 10, "method": method, "params": params},
+                    headers={"MCP-Protocol-Version": PROTOCOL_VERSION_2026},
+                )
+
+                self.assertEqual(status, 200)
+                assert payload is not None
+                self.assertNotIn("error", payload)
+                self.assertNotIn("resultType", payload["result"])
+
+    def test_reject_legacy_still_refuses_a_legacy_client(self) -> None:
+        # Narrowing the markers must not cost the harness its ability to prove an
+        # old client breaks against a 2026-only server — that stays opt-in.
+        status, _, payload = handle_json_rpc(
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/list", "params": {}},
+            config=normalize_config({"rejectLegacy": True}),
+            headers={"MCP-Protocol-Version": PROTOCOL_VERSION_2026},
+        )
+
+        self.assertEqual(status, 400)
+        assert payload is not None
+        self.assertEqual(payload["error"]["code"], -32022)
+
+    def test_legacy_handshake_never_negotiates_2026(self) -> None:
+        # Reaching the handshake proves the client is not a 2026 stateless client,
+        # so the negotiated version must always be a legacy one.
+        config = normalize_config({"initialize": {"protocolVersionEnabled": False}})
+        for requested in (PROTOCOL_VERSION_2026, "2024-11-05", "2099-01-01", None):
+            with self.subTest(requested=requested):
+                status, _, payload = handle_json_rpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 12,
+                        "method": "initialize",
+                        "params": {"protocolVersion": requested} if requested else {},
+                    },
+                    config=config,
+                )
+
+                self.assertEqual(status, 200)
+                assert payload is not None
+                self.assertIn(payload["result"]["protocolVersion"], LEGACY_PROTOCOL_VERSIONS)
 
     def test_subscriptions_listen_requires_notifications_filter(self) -> None:
         status, _, payload = handle_json_rpc(
