@@ -1226,10 +1226,21 @@ def request_era(payload: Any, headers: dict[str, str] | None = None) -> str:
     satisfy — a 400 with no way back, on every request including ``initialize``.
     It could not serve the -32022 goal above either: it only matched the single
     version the server *does* support, so that branch was unreachable through
-    it. The two markers left are ones only a 2026 client can produce. To refuse
-    legacy clients on purpose, use the ``rejectLegacy`` config flag.
+    it. To refuse legacy clients on purpose, use the ``rejectLegacy`` config flag.
+
+    A version the client *declares* is still decisive in the other direction: if
+    it names a version that exists only on the legacy transport, that client is a
+    legacy client and no header may outvote it. ``Mcp-Method``/``Mcp-Name`` are
+    not proof of 2026 on their own, because gateways attach them as their own
+    multi-server routing hints — PlayMCP sends ``Mcp-Method: tools/call`` with
+    ``Mcp-Name: <serverId>-<tool>``, a namespaced value that is not even the
+    body's ``params.name``, while declaring ``MCP-Protocol-Version: 2025-06-18``
+    and carrying an ``Mcp-Session-Id``. Reading those hints as 2026 markers sent
+    a 2025 client into a path whose envelope it never had.
     """
     lowered = {name.lower(): value for name, value in (headers or {}).items()}
+    if str(lowered.get("mcp-protocol-version", "")).strip() in LEGACY_PROTOCOL_VERSIONS:
+        return "2025"
     if "mcp-method" in lowered:
         return "2026"
     if META_PROTOCOL_VERSION in request_meta(payload):

@@ -244,6 +244,38 @@ class Protocol2026Test(unittest.TestCase):
                 self.assertNotIn("error", payload)
                 self.assertNotIn("resultType", payload["result"])
 
+    def test_gateway_routing_headers_do_not_outvote_a_declared_legacy_version(self) -> None:
+        # Verbatim shape of a failing PlayMCP request (from /inspect): it declares
+        # 2025-06-18 and carries a session id, yet attaches Mcp-Method/Mcp-Name as
+        # gateway routing hints — note Mcp-Name is namespaced and does not match
+        # params.name. The declared legacy version must win.
+        status, _, payload = handle_json_rpc(
+            {
+                "id": 3,
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "list_supported_units",
+                    "arguments": {},
+                    "_meta": {"claudecode/toolUseId": "toolu_01Qvx", "progressToken": 3},
+                },
+            },
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "Mcp-Method": "tools/call",
+                "Mcp-Name": "unitExpertMixed-list_supported_units",
+                "Mcp-Protocol-Version": "2025-06-18",
+                "Mcp-Session-Id": "0e391125-4e82-4fd7-baa4-ff809cce7ceb",
+            },
+        )
+
+        self.assertEqual(status, 200)
+        assert payload is not None
+        self.assertNotIn("error", payload)
+        self.assertIn("length:", payload["result"]["content"][0]["text"])
+        self.assertNotIn("resultType", payload["result"])
+
     def test_reject_legacy_still_refuses_a_legacy_client(self) -> None:
         # Narrowing the markers must not cost the harness its ability to prove an
         # old client breaks against a 2026-only server — that stays opt-in.
