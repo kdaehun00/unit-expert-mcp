@@ -138,7 +138,15 @@ AUTH_CODES: dict[str, dict[str, Any]] = {}
 # restarts; override with MCP_OAUTH_SECRET in real deployments.
 JWT_SECRET = os.getenv("MCP_OAUTH_SECRET", "unit-expert-mock-oauth-secret")
 ACCESS_TOKEN_TTL_SECONDS = 3600
+REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 3600
 AUTH_CODE_TTL_SECONDS = 300
+# Payload claim separating the two token kinds (distinct from the JWT *header*'s
+# "typ": "JWT"). Both are signed with the same secret, so without this claim a
+# refresh token would pass as a 30-day all-access bearer token. Tokens minted
+# before this claim existed carry none and are read as access tokens.
+TOKEN_TYPE_CLAIM = "typ"
+TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
 # Fixed demo identity handed out by the one-click login. A real login layer
 # (including "sign in with Kakao" as one option) would resolve a real user here.
 DEMO_USER_SUB = "demo-user"
@@ -196,6 +204,29 @@ def verify_access_token(token: str | None) -> dict[str, Any] | None:
     return payload
 
 
+def issue_refresh_token(claims: dict[str, Any]) -> str:
+    """Mint a long-lived refresh token — same self-verifying JWT, longer TTL.
+
+    Stateless like the access token: nothing is stored, so these cannot be
+    revoked or rotated. Adequate for a mock AS, not for a real one.
+    """
+    return issue_access_token(
+        {**claims, TOKEN_TYPE_CLAIM: TOKEN_TYPE_REFRESH}, REFRESH_TOKEN_TTL_SECONDS
+    )
+
+
+def verify_bearer_access_token(token: str | None) -> dict[str, Any] | None:
+    """Verify a Bearer token presented for resource access.
+
+    Rejects refresh tokens: they are valid signatures with a far longer life, so
+    letting one through here would hand out 30-day access to /mcp.
+    """
+    claims = verify_access_token(token)
+    if claims is None or claims.get(TOKEN_TYPE_CLAIM) == TOKEN_TYPE_REFRESH:
+        return None
+    return claims
+
+
 def bearer_token(headers: Any) -> str | None:
     """Extract the token from an `Authorization: Bearer <token>` header."""
     raw = headers.get("Authorization") or headers.get("authorization") or ""
@@ -227,7 +258,7 @@ def register_client(metadata: dict[str, Any]) -> dict[str, Any]:
         "redirect_uris": [uri for uri in redirect_uris if isinstance(uri, str)],
         "client_name": metadata.get("client_name"),
         "token_endpoint_auth_method": "none",
-        "grant_types": ["authorization_code"],
+        "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
     }
     with OAUTH_LOCK:
@@ -281,7 +312,9 @@ def authorization_server_metadata(base_url: str) -> dict[str, Any]:
         "token_endpoint": f"{base_url}/token",
         "registration_endpoint": f"{base_url}/register",
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        # Without "refresh_token" advertised here a client never even attempts a
+        # refresh, and every token it holds dies for good after an hour.
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256", "plain"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": [OAUTH_SCOPE],
@@ -4980,7 +5013,7 @@ class Handler(BaseHTTPRequestHandler):
         if not needs_auth:
             return False
 
-        if verify_access_token(bearer_token(self.headers)) is not None:
+        if verify_bearer_access_token(bearer_token(self.headers)) is not None:
             return False
         self.send_auth_challenge()
         return True
@@ -5053,7 +5086,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_token(self) -> None:
         form = self.read_form()
-        if form.get("grant_type") != "authorization_code":
+        grant_type = form.get("grant_type")
+        if grant_type == "refresh_token":
+            self.handle_refresh_grant(form)
+            return
+        if grant_type != "authorization_code":
             self.send_json(400, {"error": "unsupported_grant_type"})
             return
         entry = consume_auth_code(form.get("code", ""))
@@ -5076,23 +5113,71 @@ class Handler(BaseHTTPRequestHandler):
                 400, {"error": "invalid_grant", "error_description": "PKCE verification failed"}
             )
             return
-        base = self.base_url()
-        token = issue_access_token(
-            {
-                "iss": base,
-                "sub": entry["sub"],
-                "aud": f"{base}/mcp",
-                "client_id": entry["client_id"],
-                "scope": entry["scope"],
-            }
+        self.send_token_pair(entry["sub"], entry["client_id"], entry["scope"])
+
+    def handle_refresh_grant(self, form: dict[str, str]) -> None:
+        """RFC 6749 §6 — exchange a refresh token for a fresh access token.
+
+        This is the only way back once an access token expires. Without it every
+        token this server issues becomes permanently dead an hour after it was
+        minted, so a client caching tokens across sessions inevitably converges
+        on holding only expired ones — a 401 it can never clear.
+        """
+        claims = verify_access_token(form.get("refresh_token", ""))
+        if claims is None or claims.get(TOKEN_TYPE_CLAIM) != TOKEN_TYPE_REFRESH:
+            self.send_json(
+                400,
+                {
+                    "error": "invalid_grant",
+                    "error_description": "Unknown, expired, or non-refresh token",
+                },
+            )
+            return
+
+        client_id = claims.get("client_id", "")
+        if form.get("client_id") and form.get("client_id") != client_id:
+            self.send_json(
+                400, {"error": "invalid_grant", "error_description": "client_id mismatch"}
+            )
+            return
+
+        # A refresh may narrow the granted scope but never widen it (RFC 6749 §6).
+        granted_scope = claims.get("scope", OAUTH_SCOPE)
+        requested_scope = form.get("scope")
+        if requested_scope and set(requested_scope.split()) - set(granted_scope.split()):
+            self.send_json(
+                400,
+                {
+                    "error": "invalid_scope",
+                    "error_description": f"Scope exceeds the original grant '{granted_scope}'",
+                },
+            )
+            return
+
+        self.send_token_pair(
+            claims.get("sub", DEMO_USER_SUB), client_id, requested_scope or granted_scope
         )
+
+    def send_token_pair(self, sub: str, client_id: str, scope: str) -> None:
+        """Issue an access + refresh pair for one identity."""
+        base = self.base_url()
+        identity = {
+            "iss": base,
+            "sub": sub,
+            "aud": f"{base}/mcp",
+            "client_id": client_id,
+            "scope": scope,
+        }
         self.send_json(
             200,
             {
-                "access_token": token,
+                "access_token": issue_access_token(
+                    {**identity, TOKEN_TYPE_CLAIM: TOKEN_TYPE_ACCESS}
+                ),
                 "token_type": "Bearer",
                 "expires_in": ACCESS_TOKEN_TTL_SECONDS,
-                "scope": entry["scope"],
+                "refresh_token": issue_refresh_token(identity),
+                "scope": scope,
             },
         )
 

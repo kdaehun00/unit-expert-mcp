@@ -75,6 +75,10 @@ class OAuthServerTest(unittest.TestCase):
 
     def obtain_token(self) -> str:
         """Run the full authorization-code + PKCE flow and return an access token."""
+        return self.obtain_tokens()["access_token"]
+
+    def obtain_tokens(self) -> dict:
+        """Run the full authorization-code + PKCE flow and return the token response."""
         redirect_uri = "http://localhost/callback"
         verifier, challenge = pkce_pair()
 
@@ -130,7 +134,16 @@ class OAuthServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         body = json.loads(raw)
         self.assertEqual(body["token_type"], "Bearer")
-        return body["access_token"]
+        return body
+
+    def post_token(self, form: dict[str, str]) -> tuple[int, dict]:
+        status, _, raw = self.request(
+            "POST",
+            "/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=urlencode(form).encode(),
+        )
+        return status, json.loads(raw)
 
     # -- discovery -----------------------------------------------------------
     def test_protected_resource_metadata(self) -> None:
@@ -147,6 +160,8 @@ class OAuthServerTest(unittest.TestCase):
         self.assertTrue(body["authorization_endpoint"].endswith("/authorize"))
         self.assertTrue(body["token_endpoint"].endswith("/token"))
         self.assertIn("S256", body["code_challenge_methods_supported"])
+        # A client that cannot see this never attempts a refresh.
+        self.assertIn("refresh_token", body["grant_types_supported"])
 
     # -- off mode ------------------------------------------------------------
     def test_off_mode_allows_anonymous_tool_call(self) -> None:
@@ -226,6 +241,80 @@ class OAuthServerTest(unittest.TestCase):
         status, _, raw = self.mcp_call(cfg_for_auth("mixed-oauth"), payload, token=token)
         self.assertEqual(status, 200)
         self.assertFalse(json.loads(raw)["result"]["isError"])
+
+    # -- refresh grant -------------------------------------------------------
+    def test_token_response_includes_refresh_token(self) -> None:
+        body = self.obtain_tokens()
+        self.assertTrue(body["refresh_token"])
+        self.assertEqual(body["expires_in"], 3600)
+
+    def test_refresh_token_yields_working_access_token(self) -> None:
+        """The recovery path: an expired access token must be replaceable."""
+        refresh_token = self.obtain_tokens()["refresh_token"]
+        status, body = self.post_token(
+            {"grant_type": "refresh_token", "refresh_token": refresh_token}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["token_type"], "Bearer")
+        self.assertTrue(body["refresh_token"])
+
+        status, _, raw = self.mcp_call(
+            cfg_for_auth("oauth"),
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            token=body["access_token"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(json.loads(raw)["result"]["tools"]), 6)
+
+    def test_refresh_token_is_rejected_as_bearer(self) -> None:
+        """A refresh token is a valid signature with a 30-day life — it must not
+        open /mcp, or it becomes an all-access token."""
+        refresh_token = self.obtain_tokens()["refresh_token"]
+        status, _, _ = self.mcp_call(
+            cfg_for_auth("oauth"),
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            token=refresh_token,
+        )
+        self.assertEqual(status, 401)
+
+    def test_access_token_is_rejected_as_refresh_grant(self) -> None:
+        access_token = self.obtain_tokens()["access_token"]
+        status, body = self.post_token(
+            {"grant_type": "refresh_token", "refresh_token": access_token}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_grant")
+
+    def test_refresh_rejects_unknown_token(self) -> None:
+        status, body = self.post_token(
+            {"grant_type": "refresh_token", "refresh_token": "not-a-real-jwt"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_grant")
+
+    def test_refresh_rejects_client_id_mismatch(self) -> None:
+        refresh_token = self.obtain_tokens()["refresh_token"]
+        status, body = self.post_token(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": "mcp-client-someone-else",
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_grant")
+
+    def test_refresh_rejects_scope_widening(self) -> None:
+        refresh_token = self.obtain_tokens()["refresh_token"]
+        status, body = self.post_token(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "scope": "mcp admin",
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_scope")
 
     # -- token endpoint edge cases ------------------------------------------
     def test_token_rejects_pkce_mismatch(self) -> None:
