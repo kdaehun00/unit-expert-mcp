@@ -421,7 +421,7 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 
 `/mcp`로 나간 응답은 모두 한 요청에 한 건씩 기록한다. 가장 최근 200건만 프로세스 메모리에 두고 더 오래된 것은 버린다. `/inspect` 화면도 같은 200건까지만 든다. 다른 경로(`/scenario`, `/inspect/log` 등)는 기록하지 않는다.
 
-`GET /inspect/log`는 `{"exchanges": [...]}`를 준다. 최신 항목이 앞이다. 선택 쿼리:
+`GET /inspect/log`는 `{"exchanges": [...], "secrets": "masked"}`를 준다. 최신 항목이 앞이다. `secrets`는 인증 값을 어떻게 기록하는지다: `masked`(기본, 가려서 기록) 또는 `raw`(받은 그대로. 아래 "인증 값 가리기"). 선택 쿼리:
 
 | 쿼리 | 동작 |
 |---|---|
@@ -444,20 +444,42 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 | `timestamp` | ISO 8601 UTC, 밀리초까지. 예: `2026-01-02T03:04:05.678Z` |
 | `durationMs` | 요청을 받은 때부터 응답을 다 보낼 때까지의 시간(ms, 소수 1자리). 주입한 지연이 포함된다. 기록 시점(응답을 보내기 직전)에 그때까지의 값이 들어가고, 응답을 다 보낸 뒤 최종 값으로 바뀐다 |
 | `httpMethod`, `path` | HTTP 메서드와 경로(`/mcp`) |
-| `query` | 요청 URL의 쿼리 문자열 원본. 없으면 빈 문자열 |
+| `query` | 요청 URL의 쿼리 문자열. 없으면 빈 문자열. 인증 값인 파라미터는 값이 `***`다(아래 "인증 값 가리기") |
 | `cfg` | 요청 URL의 `cfg` 토큰. 없거나 빈 값이면 `null` |
 | `configSource` | 그 요청의 설정이 어디서 왔는지. `url`(`cfg` 쿼리), `header`(`X-MCP-Test-Scenario`), `global`(활성 설정) |
 | `source` | 요청 헤더 `X-Unit-Expert-Source`의 값. 없으면 `null`. 화면이 보내는 값은 `inspect-console`(`/send` 요청 보내기 화면)이다. `/inspect` 화면은 이 값이 있는 요청을 모두 "요청 보내기 화면에서 보낸 요청"으로 다룬다 |
 | `era` | 요청이 모던(`2026`)인지 레거시(`2025`)인지 |
 | `method` | JSON-RPC 메서드. 바디가 없거나 읽지 못했으면 `null` |
-| `requestHeaders` | `Accept`, `Content-Type`, `Authorization`과 `Mcp-`·`X-Mcp-`로 시작하는 헤더. 값은 받은 그대로다(가리지 않는다) |
+| `requestHeaders` | `Accept`, `Content-Type`, `Authorization`과 `Mcp-`·`X-Mcp-`로 시작하는 헤더. 인증 값은 가려서 넣는다(아래 "인증 값 가리기") |
 | `requestBody` | 요청 바디. JSON으로 읽히지 않으면 원문 문자열, 바디를 읽지 않는 요청(GET, DELETE, OPTIONS, 405)은 `null` |
 | `status` | 응답 HTTP 상태. 응답 없이 연결을 끊은 경우는 `0` |
 | `responseBody` | 응답 본문. 아래 참고 |
 | `rawResponse` | `rawResponses` 규칙으로 답했으면 `true` |
-| `responseHeaders` | 주입으로 붙인 응답 헤더, `rawResponses` 규칙의 헤더, 405의 `Allow` |
+| `responseHeaders` | 주입으로 붙인 응답 헤더, `rawResponses` 규칙의 헤더, 405의 `Allow`. `Set-Cookie` 값은 가린다 |
 | `serverEra` | 적용된 설정의 `serverEra`. 설정을 읽지 못했거나 기록 시점에 정해지지 않았으면 `null` |
 | `injected` | 그 응답을 만든 옵션 이름 |
+
+### 인증 값 가리기
+
+`/inspect/log`는 인증 없이 누구나 읽을 수 있으므로, 서버는 항목을 만들 때 인증 값을 가린다. 원래 값은 메모리에 두지 않는다. 인증 검사(`auth.mode`)는 받은 값 그대로 하므로 `/mcp` 응답은 달라지지 않는다.
+
+| 대상 | 규칙 |
+|---|---|
+| 헤더 이름 | `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, 그리고 이름에 `authorization`·`cookie`·`token`·`secret`·`password`·`api-key`(`apikey`, `api_key`)가 들어간 헤더. 대소문자는 가리지 않는다. 예: `X-MCP-Token` |
+| 제외 | `Mcp-`로 시작하는 헤더(`MCP-Protocol-Version`, `Mcp-Param-*` 등), `X-MCP-Test-Scenario`, `X-Unit-Expert-Source`, `WWW-Authenticate` |
+| 값 형식 | `***` + 끝 4자 + ` (len <길이>, fp <지문 8자>)`. 예: `Bearer ***cdef (len 43, fp 1a2b3c4d)`. 8자 이하인 값은 `***`만 |
+| 스킴 | `Authorization`·`Proxy-Authorization`의 첫 단어가 `Basic`, `Bearer`, `Digest`, `DPoP`, `Negotiate`, `NTLM`, `Token`이면 그대로 두고 뒤의 값만 가린다. 길이·끝 4자·지문은 스킴을 뺀 값 기준이다. 다른 단어면 값 전체를 가린다. 스킴만 있고 값이 없으면 그대로 둔다 |
+| 쿼리 | `query`에서 이름에 위 단어가 들어간 파라미터(`access_token`, `token`, `api_key` 등)의 값을 `***`로 바꾼다. `cfg`는 설정 코드이므로 그대로다 |
+| 바디 | 가리지 않는다. `requestBody`·`responseBody`는 JSON-RPC 내용이 테스트 대상이라 그대로 기록한다 |
+| `rawResponses` | 규칙에 적은 응답 헤더와 바디는 사용자가 넣은 값이므로 그대로 기록한다. `Set-Cookie`만 가린다 |
+
+- 지문(`fp`)은 값을 프로세스마다 새로 만드는 키로 HMAC-SHA256한 결과의 앞 8자다. 같은 서버 프로세스 안에서 값이 같으면 지문이 같다. 키는 밖으로 나가지 않으므로 지문만으로 값을 대조할 수 없고, 서버를 다시 시작하면 같은 값의 지문도 바뀐다.
+- 그래도 짧거나 흔한 값은 추측할 수 있다. 끝 4자와 길이가 남고, 누구나 이 서버에 후보 값을 보내 기록된 지문을 비교할 수 있기 때문이다. 쉬운 비밀번호의 Basic 인증 같은 값은 보내지 않는다.
+- 기록 대상은 `/mcp` 요청뿐이다. `/token` 등 OAuth 엔드포인트의 요청은 기록하지 않는다.
+- 환경변수 `MCP_INSPECT_RAW_SECRETS`가 `1`(또는 `true`, `yes`, `on`)이면 가리지 않고 받은 그대로 기록한다. 기본은 꺼짐이고, 로컬 디버깅용이다. 켜져 있으면 서버가 시작할 때 표준 출력에 `WARNING: MCP_INSPECT_RAW_SECRETS is on. ...` 한 줄을 찍고 `secrets`가 `raw`가 된다. 값은 기록할 때마다 읽는다.
+- `/inspect` 화면은 `secrets`가 `masked`면 기록된 값을 그대로 보여 주고, `raw`면 화면에서 가린 뒤 "값 보기"로 원래 값을 보여 준다. "curl로 다시 보내기"는 두 경우 모두 인증 헤더를 `<Authorization 값>`으로 둔다.
+
+화면과 화면이 읽는 JSON(`/`, `/scenario`, `/scenario/meta`, `/inspect`, `/inspect/log`, `/send`)의 CORS 응답에는 `Access-Control-Allow-Credentials`가 없다. `/mcp`와 그 밖의 경로는 전과 같이 `Access-Control-Allow-Credentials: true`를 보낸다.
 
 `injected`에는 그 응답을 만든 옵션 이름이 들어간다(예: `["toolCall.mode=sse", "toolCall.delaySeconds=2"]`, `["legacyModernProbe.mode=http-404"]`, `["strict2026=false"]`, `["customHeader.enabled"]`, `["server.httpStatus=401"]`). 주입이 없으면 빈 배열이다. 화면에는 목록의 주입 칸과 상세의 "주입으로 만든 응답"에 나온다.
 

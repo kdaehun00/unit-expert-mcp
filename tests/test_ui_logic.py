@@ -589,9 +589,9 @@ class ExchangeTest(UiCoreTestCase):
         self.assertEqual(
             masked,
             {
-                "Authorization": "Bearer ***wxyz",
+                "Authorization": "Bearer ***wxyz (len 26)",
                 "authorization": "Bearer ***",
-                "Cookie": "***cdef",
+                "Cookie": "***cdef (len 20)",
                 "X-Api-Key": "***",
                 "Accept": "application/json",
                 "Mcp-Method": "tools/list",
@@ -599,6 +599,32 @@ class ExchangeTest(UiCoreTestCase):
             },
         )
         self.assertEqual(headers["Authorization"], "Bearer abcdefghijklmnopqrstuvwxyz")
+
+    def test_mask_secret_headers_keeps_what_holds_no_credential(self) -> None:
+        headers = {
+            "Authorization": "Bearer",
+            "Proxy-Authorization": "my-secret-word abcdefghijkl",
+            "Cookie": "",
+            "Mcp-Param-Token": "abcdefghijklmnop",
+            "WWW-Authenticate": 'Bearer resource_metadata="http://h/x"',
+        }
+        self.assertEqual(
+            self.call("maskSecretHeaders", headers),
+            dict(headers, **{"Proxy-Authorization": "***ijkl (len 27)"}),
+        )
+
+    def test_is_secret_header_matches_the_server(self) -> None:
+        from unit_expert_mcp.server import is_secret_header
+
+        names = [
+            "Authorization", "proxy-authorization", "COOKIE", "Set-Cookie", "X-Api-Key", "x-apikey",
+            "X-Api_Key", "X-Auth-Token", "X-MCP-Token", "X-Client-Secret", "X-Password",
+            "Accept", "Content-Type", "WWW-Authenticate", "MCP-Protocol-Version", "Mcp-Param-Token",
+            "Mcp-Session-Id", TEST_SCENARIO_HEADER, "X-Unit-Expert-Source",
+        ]
+        results = self.run_calls([["isSecretHeader", name] for name in names])
+        self.assertEqual([result["value"] for result in results], [is_secret_header(name) for name in names])
+        self.assertEqual(sum(result["value"] for result in results), 11)
 
     def test_format_local_time(self) -> None:
         # The node process runs with TZ=Asia/Seoul (UTC+9).

@@ -388,6 +388,8 @@ global.fetch = async (url, init) => {
   if (params.has("cfg")) list = list.filter((entry) => (entry.cfg || "") === params.get("cfg"));
   if (params.has("limit")) list = list.slice(0, Number(params.get("limit")));
   const body = { exchanges: list };
+  // How the server says it recorded credentials (absent: an older answer).
+  if (plan.secrets) body.secrets = plan.secrets;
   if (params.get("groups") === "1") {
     // The same summary as the server's inspect_groups().
     const groups = {};
@@ -422,6 +424,7 @@ function snapshot() {
       titles: row.children.map((cell) => cell.attrs.title || (cell.children[0] && cell.children[0].attrs ? cell.children[0].attrs.title || "" : ""))
     })),
     count: el("resultCount").textContent,
+    caution: el("caution").textContent,
     emptyHidden: el("empty").hidden,
     emptyText: el("emptyText").textContent,
     newBannerHidden: el("newBanner").hidden,
@@ -528,10 +531,15 @@ function findButton(node, text) {
         cls.workdir.cleanup()
 
     def run_plan(
-        self, steps: list[dict[str, Any]], log: list[dict[str, Any]] | None = None, search: str = ""
+        self,
+        steps: list[dict[str, Any]],
+        log: list[dict[str, Any]] | None = None,
+        search: str = "",
+        secrets: str | None = None,
     ) -> dict[str, Any]:
         plan = {
             "search": search,
+            "secrets": secrets,
             "log": base_log() if log is None else log,
             "steps": steps,
             "hiddenIds": self.hidden_ids,
@@ -851,7 +859,8 @@ function findButton(node, text) {
                 {"detailButton": "curl 명령 복사"},
                 {"click": "closeDetail"},
                 {"snapshot": "closed"},
-            ]
+            ],
+            secrets="raw",  # the server recorded the header as received
         )
         masked = result["masked"]
         detail = masked["detail"]
@@ -871,7 +880,7 @@ function findButton(node, text) {
             "헤더와 바디 비교",
             "디코드: 한글",
             f"POST /mcp?cfg={LEGACY_TOKEN}",
-            "Bearer ***wxyz",
+            "Bearer ***wxyz (len 26)",
             "HTTP 400",
             "curl로 다시 보내기",
             f"curl -i -sS -X POST 'http://localhost:8000/mcp?cfg={LEGACY_TOKEN}'",
@@ -892,6 +901,40 @@ function findButton(node, text) {
         self.assertNotIn("has-detail", closed["workspace"])
         self.assertEqual(closed["detail"], "")
         self.assertFalse(any(row["current"] for row in closed["rows"]))
+        self.assertIn("요청 헤더가 그대로 남으니 실제 서비스 토큰은 보내지 마세요.", masked["caution"])
+
+    def test_a_value_the_server_masked_is_shown_as_recorded(self) -> None:
+        recorded = "Bearer ***wxyz (len 26, fp 1a2b3c4d)"
+        entry = dict(REJECTED, requestHeaders=dict(REJECTED["requestHeaders"], Authorization=recorded))
+        for secrets in ("masked", None):  # None: the page's own default
+            with self.subTest(secrets=secrets):
+                result = self.run_plan(
+                    [{"clickRow": 3}, {"snapshot": "open"}], log=[exchange(1), entry], secrets=secrets
+                )
+                detail = result["open"]["detail"]
+                for text in (
+                    recorded,
+                    "서버가 가려서 기록했습니다.",
+                    "-H 'Authorization: <Authorization 값>'",
+                    "Authorization 값은 서버가 가려서 기록했습니다. 실제 값으로 바꿔서 보내세요.",
+                ):
+                    self.assertIn(text, detail)
+                # Nothing to reveal: the original is not in the log.
+                self.assertNotIn("값 보기", detail)
+                self.assertNotIn("'값 보기'를 누른 뒤", detail)
+                # The notice follows what the log answer says; without it the markup's stays.
+                self.assertEqual(
+                    result["open"]["caution"],
+                    "최근 200건을 모든 사용자가 함께 봅니다. 인증 헤더 값은 가려서 기록하고, 바디는 그대로 남습니다."
+                    if secrets
+                    else "",
+                )
+
+    def test_a_short_masked_value_still_gets_a_placeholder(self) -> None:
+        entry = exchange(2, requestHeaders={"Authorization": "Bearer ***", "Accept": "application/json"})
+        detail = self.run_plan([{"clickRow": 2}, {"snapshot": "open"}], log=[entry])["open"]["detail"]
+        self.assertIn("-H 'Authorization: <Authorization 값>'", detail)
+        self.assertIn("-H 'Accept: application/json'", detail)
 
     def test_detail_of_other_kinds(self) -> None:
         log = base_log() + [

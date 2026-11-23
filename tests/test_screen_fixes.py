@@ -5,6 +5,7 @@ while a config has an error, and the small reading aids around them."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -366,8 +367,13 @@ class PageWordingTest(unittest.TestCase):
                 with self.subTest(word=word, where=name):
                     self.assertNotIn(word, text)
 
-    def test_inspect_warns_about_recorded_headers(self) -> None:
-        self.assertIn("요청 헤더가 그대로 남으니 실제 서비스 토큰은 보내지 마세요.", self.inspect)
+    def test_inspect_says_how_headers_are_recorded(self) -> None:
+        notice = re.search(r'<p class="caution" id="caution" role="note">([^<]*)</p>', self.inspect)
+        self.assertIsNotNone(notice)
+        self.assertEqual(
+            notice.group(1),
+            "최근 200건을 모든 사용자가 함께 봅니다. 인증 헤더 값은 가려서 기록하고, 바디는 그대로 남습니다.",
+        )
 
     def test_the_cli_prefix_is_defined_once(self) -> None:
         self.assertNotIn("cliPrefixInMeta", self.scenario)

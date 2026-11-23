@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import socket
 import time
 import uuid
@@ -20,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import isfinite
 from threading import Lock
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, unquote_plus, urlencode, urlparse
 
 SERVER_NAME = "unitExpert"
 SERVER_VERSION = "1.0.0"
@@ -112,6 +113,107 @@ INSPECT_SOURCE_HEADER = "X-Unit-Expert-Source"
 INSPECT_HEADER_PREFIXES = ("mcp-", "x-mcp-")
 INSPECT_HEADER_NAMES = ("accept", "content-type", "authorization")
 
+# The inspection log is public (GET /inspect/log needs no auth), so credential
+# values are masked before they are stored. Setting this environment variable to
+# 1/true/yes/on stores them as received instead (local debugging only).
+INSPECT_RAW_SECRETS_ENV = "MCP_INSPECT_RAW_SECRETS"
+SECRET_MASK = "***"
+# Headers whose value is a credential: these names, and any name holding one of
+# the SECRET_NAME_RE words. The same rule masks /mcp query parameters.
+SECRET_HEADER_NAMES = ("authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key")
+SECRET_NAME_RE = re.compile(r"authorization|cookie|token|secret|password|api[-_]?key", re.IGNORECASE)
+# Never credentials, whatever their name holds: MCP wire headers (Mcp-*,
+# MCP-Protocol-Version), this server's own test headers and the challenge.
+SECRET_HEADER_EXEMPT_PREFIXES = ("mcp-",)
+SECRET_HEADER_EXEMPT_NAMES = ("x-mcp-test-scenario", "x-unit-expert-source", "www-authenticate")
+# Authorization schemes left readable in front of a masked credential.
+AUTH_SCHEMES = ("basic", "bearer", "digest", "dpop", "negotiate", "ntlm", "token")
+# A masked value keeps this many trailing characters, when it is longer than
+# SECRET_SHORT_LENGTH characters.
+SECRET_TAIL_LENGTH = 4
+SECRET_SHORT_LENGTH = 8
+# Key of the fingerprint in a masked value. It is drawn anew for each process
+# and never leaves it, so a fingerprint cannot be checked against guesses offline.
+SECRET_FINGERPRINT_KEY = secrets.token_bytes(32)
+
+
+def inspect_raw_secrets() -> bool:
+    """True when the log stores credential values as received (opt-in)."""
+    return os.getenv(INSPECT_RAW_SECRETS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def inspect_secrets_mode() -> str:
+    """How the log stores credential values: "masked" (default) or "raw"."""
+    return "raw" if inspect_raw_secrets() else "masked"
+
+
+def is_secret_header(name: str) -> bool:
+    """Whether a header of this name carries a credential (see SECRET_NAME_RE)."""
+    lowered = name.lower()
+    if lowered in SECRET_HEADER_EXEMPT_NAMES or lowered.startswith(SECRET_HEADER_EXEMPT_PREFIXES):
+        return False
+    return lowered in SECRET_HEADER_NAMES or SECRET_NAME_RE.search(lowered) is not None
+
+
+def secret_fingerprint(credential: str) -> str:
+    """Eight hex characters that are equal for equal credentials in this process."""
+    digest = hmac.new(SECRET_FINGERPRINT_KEY, credential.encode("utf-8", "surrogateescape"), hashlib.sha256)
+    return digest.hexdigest()[:8]
+
+
+def mask_secret_value(value: Any, *, scheme: bool = False) -> Any:
+    """A credential with its value hidden, for example ``Bearer ***cdef (len 43, fp 1a2b3c4d)``.
+
+    ``scheme`` keeps a known Authorization scheme readable. A credential of
+    SECRET_SHORT_LENGTH characters or fewer becomes ``***`` alone. The original
+    cannot be rebuilt: what is left is its last four characters, its length and
+    a keyed fingerprint that tells whether two requests carried the same value.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return value
+    prefix, credential = "", value.strip()
+    if scheme:
+        head, _, rest = credential.partition(" ")
+        if head.lower() in AUTH_SCHEMES:
+            if not rest.strip():
+                return value  # a scheme without a credential holds no secret
+            prefix, credential = head + " ", rest.strip()
+    if len(credential) <= SECRET_SHORT_LENGTH:
+        return prefix + SECRET_MASK
+    return (
+        f"{prefix}{SECRET_MASK}{credential[-SECRET_TAIL_LENGTH:]} "
+        f"(len {len(credential)}, fp {secret_fingerprint(credential)})"
+    )
+
+
+def mask_secret_headers(headers: dict[str, Any]) -> dict[str, Any]:
+    """A copy of headers with the values of credential headers masked."""
+    masked = {}
+    for name, value in headers.items():
+        if is_secret_header(name):
+            value = mask_secret_value(
+                value, scheme=name.lower() in {"authorization", "proxy-authorization"}
+            )
+        masked[name] = value
+    return masked
+
+
+def mask_secret_query(query: str) -> str:
+    """A query string with the values of credential parameters replaced by ``***``.
+
+    Parameters are matched by name with SECRET_NAME_RE (access_token, token,
+    api_key, ...). ``cfg`` is a config code, not a credential, and stays.
+    """
+    if not query:
+        return query
+    parts = []
+    for part in query.split("&"):
+        key, separator, value = part.partition("=")
+        if separator and value and key != CONFIG_QUERY_PARAM and SECRET_NAME_RE.search(unquote_plus(key)):
+            part = f"{key}={SECRET_MASK}"
+        parts.append(part)
+    return "&".join(parts)
+
 
 def record_exchange(
     method_http: str,
@@ -154,6 +256,13 @@ def record_exchange(
     era = request_era(request_body, dict(request_headers) if request_headers else None)
     source = request_headers.get(INSPECT_SOURCE_HEADER) if request_headers else None
     source = source.strip() if isinstance(source, str) else None
+    recorded_response_headers = dict(response_headers or {})
+    cfg_token = parse_qs(query).get(CONFIG_QUERY_PARAM, [None])[0]
+    if not inspect_raw_secrets():
+        # Masked before it is stored: the log never holds the original values.
+        headers = mask_secret_headers(headers)
+        recorded_response_headers = mask_secret_headers(recorded_response_headers)
+        query = mask_secret_query(query)
     now = datetime.now(timezone.utc)
     entry: dict[str, Any] = {}
     with INSPECT_LOCK:
@@ -171,13 +280,13 @@ def record_exchange(
                 "status": status,
                 "responseBody": response_body,
                 "rawResponse": raw_response,
-                "responseHeaders": dict(response_headers or {}),
+                "responseHeaders": recorded_response_headers,
                 "serverEra": server_era,
                 "injected": list(injected or []),
                 "timestamp": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                 "durationMs": elapsed_ms(started),
                 "query": query,
-                "cfg": parse_qs(query).get(CONFIG_QUERY_PARAM, [None])[0],
+                "cfg": cfg_token,
                 "configSource": config_source,
                 "source": source or None,
             }
@@ -3709,6 +3818,13 @@ def _header_param_map() -> dict[str, list[dict[str, str]]]:
     }
 
 
+# Second sentence of the /inspect notice, by how the log stores credentials.
+INSPECT_CAUTIONS = {
+    "masked": "인증 헤더 값은 가려서 기록하고, 바디는 그대로 남습니다.",
+    "raw": "요청 헤더가 그대로 남으니 실제 서비스 토큰은 보내지 마세요.",
+}
+
+
 def render_inspect_page() -> str:
     """Viewer of recent /mcp exchanges: address picker, request list and detail.
 
@@ -3716,6 +3832,7 @@ def render_inspect_page() -> str:
     (``since=<seq>``), adding rows instead of drawing the list again.
     """
     meta = scenario_meta()
+    secrets_mode = inspect_secrets_mode()
     page_meta = {
         "errorCodes": meta["errorCodes"],
         "defaults": meta["defaults"],
@@ -3724,6 +3841,8 @@ def render_inspect_page() -> str:
         "eraLabels": SERVER_ERA_LABELS,
         "logSize": INSPECT_LOG.maxlen,
         "modernVersion": PROTOCOL_VERSION_2026,
+        "secrets": secrets_mode,
+        "cautions": INSPECT_CAUTIONS,
     }
     return _fill_template(
         _INSPECT_PAGE,
@@ -3731,7 +3850,9 @@ def render_inspect_page() -> str:
             "BASE_CSS": UI_BASE_CSS,
             "NAV_CSS": UI_NAV_CSS,
             "NAV": render_nav("inspect"),
-            "LOG_SIZE": str(INSPECT_LOG.maxlen),
+            "CAUTION": escape(
+                f"최근 {INSPECT_LOG.maxlen}건을 모든 사용자가 함께 봅니다. {INSPECT_CAUTIONS[secrets_mode]}"
+            ),
             "UI_CORE_JS": UI_CORE_JS,
             "PAGE_JS": _fill_template(_INSPECT_PAGE_JS, {"META_JSON": _script_json(page_meta)}),
         },
@@ -3909,7 +4030,7 @@ _INSPECT_PAGE = """<!doctype html>
   <main>
     <h1>요청 기록</h1>
     <p class="lead">MCP 주소로 온 요청과 서버가 보낸 응답입니다.</p>
-    <p class="caution" role="note">최근 __LOG_SIZE__건을 모든 사용자가 함께 봅니다. 요청 헤더가 그대로 남으니 실제 서비스 토큰은 보내지 마세요.</p>
+    <p class="caution" id="caution" role="note">__CAUTION__</p>
 
     <section class="card address" aria-labelledby="addrTitle">
       <h2 id="addrTitle"><label for="fCfg">어느 주소로 온 요청을 볼까요?</label></h2>
@@ -4071,6 +4192,7 @@ _INSPECT_PAGE_JS = r"""(function () {
   const PROBE_EVERY = 15;
   // The page holds as many rows as the server keeps entries.
   const MAX_ROWS = META.logSize;
+  const CAUTION_START = "최근 " + META.logSize + "건을 모든 사용자가 함께 봅니다. ";
   const RECHECK_LIMIT = 5;
   const KNOWN_METHODS = [
     "initialize", "notifications/initialized", "server/discover", "tools/list", "tools/call",
@@ -4119,6 +4241,8 @@ _INSPECT_PAGE_JS = r"""(function () {
   let selectedExchange = null;
   let focusSeq = null;
   let revealSecrets = false;
+  // "masked": the server recorded credential values masked. "raw": as received.
+  let secretsMode = META.secrets === "raw" ? "raw" : "masked";
   let hiddenNew = [];
   let blockingKeys = [];
   let firstLoad = true;
@@ -4692,10 +4816,16 @@ _INSPECT_PAGE_JS = r"""(function () {
 
   // ---- loading -----------------------------------------------------------
 
+  function setSecretsMode(mode) {
+    secretsMode = mode;
+    setText("caution", CAUTION_START + META.cautions[mode]);
+  }
+
   async function fetchLog(query) {
     const response = await fetch("/inspect/log" + query, { cache: "no-store" });
     if (!response.ok) throw new Error("HTTP " + response.status);
     const data = await response.json();
+    if (data.secrets === "raw" || data.secrets === "masked") setSecretsMode(data.secrets);
     // groups=1 also returns the addresses that got requests.
     if (Array.isArray(data.groups)) {
       addressRows = UI.addressGroups(data.groups, DEFAULTS, SCHEMA);
@@ -4944,14 +5074,21 @@ _INSPECT_PAGE_JS = r"""(function () {
   function writeSecrets(x) {
     if (!detailRefs || detailRefs.seq !== x.seq) return;
     const headers = x.requestHeaders || {};
+    // A value the server masked is shown as recorded: there is nothing to reveal.
+    const raw = secretsMode === "raw";
+    const reveal = raw && revealSecrets;
     detailRefs.requestHeaders.replaceChildren(
-      headerTable(revealSecrets ? headers : UI.maskSecretHeaders(headers), "기록된 요청 헤더가 없습니다.")
+      headerTable(raw && !reveal ? UI.maskSecretHeaders(headers) : headers, "기록된 요청 헤더가 없습니다.")
     );
-    const curl = UI.buildExchangeCurl(x, location.origin, revealSecrets);
+    const curl = UI.buildExchangeCurl(x, location.origin, reveal);
     detailRefs.curl.textContent = curl.command;
-    detailRefs.curlNote.textContent = curl.placeholders.length
-      ? curl.placeholders.join(", ") + " 값은 가렸습니다. '값 보기'를 누른 뒤 복사하면 실제 값이 들어갑니다."
-      : "";
+    let note = "";
+    if (curl.placeholders.length) {
+      note = curl.placeholders.join(", ") + (raw
+        ? " 값은 가렸습니다. '값 보기'를 누른 뒤 복사하면 실제 값이 들어갑니다."
+        : " 값은 서버가 가려서 기록했습니다. 실제 값으로 바꿔서 보내세요.");
+    }
+    detailRefs.curlNote.textContent = note;
     if (detailRefs.reveal) {
       detailRefs.reveal.setAttribute("aria-pressed", revealSecrets ? "true" : "false");
       detailRefs.reveal.textContent = revealSecrets ? "값 가리기" : "값 보기";
@@ -4960,12 +5097,17 @@ _INSPECT_PAGE_JS = r"""(function () {
 
   function requestSection(x) {
     const headers = x.requestHeaders || {};
-    const masked = UI.maskSecretHeaders(headers);
-    const hasSecret = Object.keys(headers).some((name) => masked[name] !== headers[name]);
+    const hasSecret = Object.keys(headers).some(
+      (name) => UI.isSecretHeader(name) && typeof headers[name] === "string" && headers[name].trim() !== ""
+    );
     const holder = el("div");
     let reveal = null;
     const headActions = el("div", { class: "d-actions" });
-    if (hasSecret) {
+    if (hasSecret && secretsMode !== "raw") {
+      headActions.append(
+        el("span", { class: "hint", title: "서버가 가려서 기록했습니다. 원래 값은 서버에도 없습니다.", text: "서버가 가려서 기록했습니다." })
+      );
+    } else if (hasSecret) {
       reveal = el("button", { type: "button", class: "secondary small", "aria-pressed": "false", text: "값 보기" });
       reveal.addEventListener("click", () => {
         revealSecrets = !revealSecrets;
@@ -5997,6 +6139,11 @@ var UnitExpertUI = (function () {
   var LEGACY_VERSION = "__LEGACY_VERSION__";
   var SCENARIO_HEADER = "__SCENARIO_HEADER__";
   var PREVIEW_SOURCE = "__PREVIEW_SOURCE__";
+  // Which headers carry credentials: the server's own lists (is_secret_header).
+  var SECRET_HEADER_NAMES = __SECRET_HEADER_NAMES__;
+  var SECRET_HEADER_EXEMPT = __SECRET_HEADER_EXEMPT__;
+  var SECRET_NAME_RE = new RegExp(__SECRET_NAME_PATTERN__, "i");
+  var AUTH_SCHEMES = __AUTH_SCHEMES__;
   var CLI_PREFIX = "python3 -m unit_expert_mcp.client";
   var CLIENT_INFO = { name: "scenario-ui", version: "1.0" };
   var BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -6541,23 +6688,41 @@ var UnitExpertUI = (function () {
     });
   }
 
-  /* A copy of headers with credentials hidden. A Bearer/Basic scheme and the
-     last four characters of a long value stay readable. */
+  /* Whether a header of this name carries a credential. The same rule as the
+     server's is_secret_header(): the server masks these before it records. */
+  function isSecretHeader(name) {
+    var lowered = String(name).toLowerCase();
+    if (lowered.indexOf("mcp-") === 0 || SECRET_HEADER_EXEMPT.indexOf(lowered) >= 0) return false;
+    return SECRET_HEADER_NAMES.indexOf(lowered) >= 0 || SECRET_NAME_RE.test(lowered);
+  }
+
+  /* A copy of headers with credentials hidden, for a log the server recorded
+     as received. A known Authorization scheme, the last four characters and
+     the length of a value longer than eight characters stay readable. */
   function maskSecretHeaders(headers) {
     var masked = {};
     Object.keys(headers || {}).forEach(function (name) {
       var lowered = name.toLowerCase();
       var value = headers[name];
-      var secret = lowered === "authorization" || lowered === "proxy-authorization" ||
-        lowered === "cookie" || lowered === "set-cookie" || /token|secret|password|api-key/.test(lowered);
-      if (!secret || typeof value !== "string") {
+      if (!isSecretHeader(name) || typeof value !== "string" || !value.trim()) {
         masked[name] = value;
         return;
       }
-      var match = /^(\S+)\s+(.+)$/.exec(value);
-      var scheme = match && (lowered === "authorization" || lowered === "proxy-authorization") ? match[1] + " " : "";
-      var credential = scheme ? match[2] : value;
-      masked[name] = scheme + "***" + (credential.length >= 12 ? credential.slice(-4) : "");
+      var credential = value.trim();
+      var scheme = "";
+      if (lowered === "authorization" || lowered === "proxy-authorization") {
+        var match = /^(\S+)(?:\s+(.*))?$/.exec(credential);
+        if (match && AUTH_SCHEMES.indexOf(match[1].toLowerCase()) >= 0) {
+          if (!match[2]) {
+            masked[name] = value;
+            return;
+          }
+          scheme = match[1] + " ";
+          credential = match[2];
+        }
+      }
+      masked[name] = scheme + "***" +
+        (credential.length > 8 ? credential.slice(-4) + " (len " + credential.length + ")" : "");
     });
     return masked;
   }
@@ -6808,10 +6973,10 @@ var UnitExpertUI = (function () {
 
   /* curl command that sends a recorded exchange again: {command, placeholders}.
      Unless reveal is true, a credential header carries a placeholder instead
-     of its value and its name is listed in placeholders. */
+     of its value and its name is listed in placeholders. reveal is for a log
+     recorded as received only: a value the server masked is not a value. */
   function buildExchangeCurl(exchange, origin, reveal) {
     var headers = exchange.requestHeaders || {};
-    var masked = maskSecretHeaders(headers);
     var placeholders = [];
     var method = /^[A-Z]+$/.test(exchange.httpMethod || "") ? exchange.httpMethod : "POST";
     var url = String(origin || "").replace(/\/+$/, "") + (exchange.path || "/mcp") +
@@ -6819,7 +6984,7 @@ var UnitExpertUI = (function () {
     var lines = ["curl -i -sS -X " + method + " " + shellQuote(url)];
     Object.keys(headers).forEach(function (name) {
       var value = headers[name];
-      if (!reveal && masked[name] !== value) {
+      if (!reveal && isSecretHeader(name) && typeof value === "string" && value.trim()) {
         placeholders.push(name);
         value = "<" + name + " 값>";
       }
@@ -7454,6 +7619,7 @@ var UnitExpertUI = (function () {
     filterBlockers: filterBlockers,
     filterExchanges: filterExchanges,
     describeConfigError: describeConfigError,
+    isSecretHeader: isSecretHeader,
     maskSecretHeaders: maskSecretHeaders,
     formatLocalTime: formatLocalTime,
     formatLocalStamp: formatLocalStamp,
@@ -7487,6 +7653,10 @@ UI_CORE_JS = _fill_template(
         "LEGACY_VERSION": LATEST_LEGACY_PROTOCOL_VERSION,
         "SCENARIO_HEADER": TEST_SCENARIO_HEADER,
         "PREVIEW_SOURCE": PREVIEW_SOURCE,
+        "SECRET_HEADER_NAMES": json.dumps(list(SECRET_HEADER_NAMES)),
+        "SECRET_HEADER_EXEMPT": json.dumps(list(SECRET_HEADER_EXEMPT_NAMES)),
+        "SECRET_NAME_PATTERN": json.dumps(SECRET_NAME_RE.pattern),
+        "AUTH_SCHEMES": json.dumps(list(AUTH_SCHEMES)),
     },
 )
 
@@ -9924,6 +10094,11 @@ ROUTE_METHODS = {
 }
 
 
+# The control pages and the JSON they read. Their CORS answer carries no
+# Access-Control-Allow-Credentials (see Handler.send_cors_headers).
+SCREEN_PATHS = frozenset({"/", "/scenario", "/scenario/meta", "/inspect", "/inspect/log", "/send"})
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "UnitExpertMCP/1.0"
@@ -10144,7 +10319,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as error:
                 self.send_json(400, {"ok": False, "error": str(error)})
                 return
-            log_body: dict[str, Any] = {"exchanges": exchanges}
+            log_body: dict[str, Any] = {"exchanges": exchanges, "secrets": inspect_secrets_mode()}
             if inspect_groups_requested(raw_query):
                 log_body["groups"] = inspect_groups()
             self.send_json(200, log_body)
@@ -10690,6 +10865,11 @@ class Handler(BaseHTTPRequestHandler):
         """Default CORS headers. ``skip`` holds lowercase names the caller sends itself."""
         origin = self.headers.get("Origin") or "*"
         requested_headers = self.headers.get("Access-Control-Request-Headers")
+        skip = set(skip or ())
+        if urlparse(self.path).path in SCREEN_PATHS:
+            # The control pages read these from their own origin. Another origin
+            # may read them too, but never with the browser's credentials.
+            skip.add("access-control-allow-credentials")
         defaults = (
             ("Access-Control-Allow-Origin", origin),
             ("Access-Control-Allow-Credentials", "true"),
@@ -11013,6 +11193,11 @@ def main() -> None:
     port = int(os.getenv("PORT", "8000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"{SERVER_NAME} listening on 0.0.0.0:{port}")
+    if inspect_raw_secrets():
+        print(
+            f"WARNING: {INSPECT_RAW_SECRETS_ENV} is on. GET /inspect/log shows Authorization "
+            "and other credential values as received, to anyone who can reach this server."
+        )
     server.serve_forever()
 
 

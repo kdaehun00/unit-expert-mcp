@@ -216,11 +216,13 @@ class EntryFieldsTest(InspectLogTestCase):
     def test_source_is_null_without_the_header(self) -> None:
         self.assertIsNone(self.recorded_post(legacy_request("tools/list"))[3][0]["source"])
 
-    def test_authorization_header_is_still_recorded_as_sent(self) -> None:
+    def test_authorization_header_is_recorded_masked(self) -> None:
         entry = self.recorded_post(
             legacy_request("tools/list"), headers={"Authorization": "Bearer not-a-real-token"}
         )[3][0]
-        self.assertEqual(entry["requestHeaders"]["Authorization"], "Bearer not-a-real-token")
+        recorded = entry["requestHeaders"]["Authorization"]
+        self.assertRegex(recorded, r"^Bearer \*\*\*oken \(len 16, fp [0-9a-f]{8}\)$")
+        self.assertNotIn("not-a-real-token", json.dumps(entry))
 
 
 class EveryBranchIsRecordedTest(InspectLogTestCase):
@@ -502,7 +504,7 @@ class InspectLogEndpointTest(InspectLogTestCase):
     def seqs(self, query: str) -> list[int]:
         status, body = self.log(query)
         self.assertEqual(status, 200)
-        self.assertEqual(list(body), ["exchanges"])
+        self.assertEqual(list(body), ["exchanges", "secrets"])
         return [entry["seq"] for entry in body["exchanges"]]
 
     def setUp(self) -> None:
@@ -521,7 +523,8 @@ class InspectLogEndpointTest(InspectLogTestCase):
     def test_without_a_query_the_response_is_the_whole_log(self) -> None:
         status, body = self.log()
         self.assertEqual(status, 200)
-        self.assertEqual(list(body), ["exchanges"])
+        self.assertEqual(list(body), ["exchanges", "secrets"])
+        self.assertEqual(body["secrets"], "masked")
         self.assertIsInstance(body["exchanges"], list)
         self.assertEqual([entry["seq"] for entry in body["exchanges"]], [e["seq"] for e in inspect_snapshot()])
         # Newest first, as before.
@@ -601,8 +604,8 @@ class AddressGroupsTest(InspectLogTestCase):
 
     def test_without_the_parameter_the_answer_is_unchanged(self) -> None:
         self.recorded_post(legacy_request("tools/list"))
-        self.assertEqual(set(self.log("")), {"exchanges"})
-        self.assertEqual(set(self.log("?groups=0")), {"exchanges"})
+        self.assertEqual(set(self.log("")), {"exchanges", "secrets"})
+        self.assertEqual(set(self.log("?groups=0")), {"exchanges", "secrets"})
         self.assertEqual(inspect_groups_requested("since=3&groups=1"), True)
         self.assertEqual(inspect_groups_requested("since=3"), False)
 
