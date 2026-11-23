@@ -36,7 +36,9 @@ def headers(method: str, *, version: str = PROTOCOL_VERSION_2026, **extra: str) 
 
 
 class Protocol2026Test(unittest.TestCase):
-    def test_initialize_is_stateless_and_wraps_result(self) -> None:
+    def test_initialize_is_method_not_found_on_the_modern_path(self) -> None:
+        # 2026-07-28 removed initialize; a modern request for it is 404 + -32601
+        # (spec: streamable-http "Protocol Version Header").
         status, response_headers, payload = handle_json_rpc(
             {
                 "jsonrpc": "2.0",
@@ -44,6 +46,23 @@ class Protocol2026Test(unittest.TestCase):
                 "method": "initialize",
                 "params": {"_meta": meta()},
             },
+            headers=headers("initialize"),
+        )
+
+        self.assertEqual(status, 404)
+        self.assertNotIn("Mcp-Session-Id", response_headers)
+        assert payload is not None
+        self.assertEqual(payload["error"]["code"], -32601)
+
+    def test_lenient_mode_keeps_the_old_initialize_probe_answer(self) -> None:
+        status, response_headers, payload = handle_json_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"_meta": meta()},
+            },
+            config={"strict2026": False},
             headers=headers("initialize"),
         )
 
@@ -72,7 +91,8 @@ class Protocol2026Test(unittest.TestCase):
         self.assertEqual(status, 200)
         assert payload is not None
         self.assertEqual(payload["result"]["resultType"], "complete")
-        self.assertEqual(len(payload["result"]["tools"]), 6)
+        # 6 converters + the 2 modern-only test tools (echo_header_params, confirm_action).
+        self.assertEqual(len(payload["result"]["tools"]), 8)
         self.assertIn(META_SERVER, payload["result"]["_meta"])
 
     def test_tools_list_can_advertise_positive_cache_ttl(self) -> None:

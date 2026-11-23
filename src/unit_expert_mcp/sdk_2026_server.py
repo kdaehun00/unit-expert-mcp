@@ -21,7 +21,6 @@ from unit_expert_mcp.server import (
     LENGTH_FACTORS,
     SERVER_NAME,
     SERVER_VERSION,
-    SERVICE_NAME,
     SUPPORTED_UNITS,
     VOLUME_FACTORS,
     WEIGHT_FACTORS,

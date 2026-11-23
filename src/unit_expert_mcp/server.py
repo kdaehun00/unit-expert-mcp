@@ -8,6 +8,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import socket
 import time
 import uuid
 from collections import deque
@@ -33,6 +35,9 @@ LEGACY_PROTOCOL_VERSIONS = tuple(
     version for version in SUPPORTED_PROTOCOL_VERSIONS if version != PROTOCOL_VERSION_2026
 )
 LATEST_LEGACY_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[-1]
+# Versions the modern (stateless) path implements. Spec: a request for any other
+# version gets 400 + -32022 with data.supported listing exactly these.
+MODERN_PROTOCOL_VERSIONS = (PROTOCOL_VERSION_2026,)
 # Per-request _meta envelope keys (spec: basic/index#meta).
 META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
@@ -46,6 +51,28 @@ ERR_HEADER_MISMATCH = -32020
 ERR_MISSING_CAPABILITY = -32021
 ERR_UNSUPPORTED_VERSION = -32022
 ERR_INVALID_PARAMS = -32602
+ERR_METHOD_NOT_FOUND = -32601
+ERR_INVALID_REQUEST = -32600
+ERR_INTERNAL = -32603
+# Methods the modern path implements. Anything else (including methods removed
+# in 2026-07-28 such as initialize and ping) is 404 + -32601.
+MODERN_SUPPORTED_METHODS = (
+    "server/discover",
+    "tools/list",
+    "tools/call",
+    "subscriptions/listen",
+)
+# Base64 sentinel for Mcp-Name / Mcp-Param-* header values (case-sensitive).
+BASE64_SENTINEL_PREFIX = "=?base64?"
+BASE64_SENTINEL_SUFFIX = "?="
+MCP_PARAM_HEADER_PREFIX = "mcp-param-"
+# Schema keyword that mirrors a tool argument into an Mcp-Param-{name} header.
+X_MCP_HEADER = "x-mcp-header"
+# Test-only tools that exist on the modern path only (see modern_test_tools).
+HEADER_PARAMS_TOOL = "echo_header_params"
+MRTR_TOOL = "confirm_action"
+MRTR_INPUT_KEY = "confirm"
+MRTR_STATE_TTL_SECONDS = 600
 # method -> params key mirrored into the Mcp-Name header.
 NAME_BEARING_METHODS = {
     "tools/call": "name",
@@ -58,6 +85,7 @@ PROTOCOL_VERSION_CHOICES = (
     ("2025-03-26", "2025-03-26 (최소 지원)"),
     ("2025-06-18", "2025-06-18 (지원)"),
     ("2025-11-25", "2025-11-25 (최대 지원)"),
+    ("2026-07-28", "2026-07-28 (모던 버전 - handshake 응답으로는 무효)"),
 )
 TEST_SCENARIO_HEADER = "X-MCP-Test-Scenario"
 DEFAULT_DELAY_SECONDS = 5.0
@@ -65,6 +93,9 @@ PUBLIC_MCP_URL = "https://unit-expert-mcp.onrender.com/mcp"
 CONFIG_QUERY_PARAM = "cfg"
 
 SESSIONS: set[str] = set()
+# Session ids ended with DELETE /mcp (session.validate). The official Python SDK
+# 1.27.2 answers them differently from ids it never issued.
+TERMINATED_SESSIONS: set[str] = set()
 SCENARIO_LOCK = Lock()
 ACTIVE_SCENARIO = "ok"
 ACTIVE_CONFIG: dict[str, Any] = {}
@@ -86,9 +117,25 @@ def record_exchange(
     request_body: Any,
     status: int,
     response_body: Any,
+    *,
+    raw_response: bool = False,
+    response_headers: dict[str, str] | None = None,
+    server_era: str | None = None,
+    injected: list[str] | None = None,
 ) -> None:
-    """Append one /mcp exchange to the inspection ring buffer."""
+    """Append one /mcp exchange to the inspection ring buffer.
+
+    ``injected`` names the config options that shaped this response (for example
+    ``toolCall.mode=sse``), so /inspect shows why a response looks the way it does.
+    """
     global INSPECT_SEQ
+    if raw_response and isinstance(response_body, str):
+        # Developer-authored bodies may be deliberately broken JSON; keep the
+        # original text when it doesn't parse.
+        try:
+            response_body = json.loads(response_body)
+        except json.JSONDecodeError:
+            pass
     headers = {}
     for name, value in (request_headers.items() if request_headers else []):
         lowered = name.lower()
@@ -110,6 +157,10 @@ def record_exchange(
                 "requestBody": request_body,
                 "status": status,
                 "responseBody": response_body,
+                "rawResponse": raw_response,
+                "responseHeaders": dict(response_headers or {}),
+                "serverEra": server_era,
+                "injected": list(injected or []),
             }
         )
 
@@ -562,15 +613,96 @@ TOOLS_LIST_MODES = {
     "too-many": "너무 많은 tools 반환",
 }
 
+# server/discover injection (modern path only). Applied to a discover request
+# that passed envelope validation.
+DISCOVER_MODES = {
+    "normal": "정상 DiscoverResult",
+    "no-modern-version": "supportedVersions에 2026-07-28 없음(레거시 버전만)",
+    "empty-versions": "supportedVersions: []",
+    "missing-versions": "supportedVersions 필드 없음",
+    "json-rpc-error": "HTTP 200 + JSON-RPC error(discover.errorCode)",
+    "header-mismatch": "HTTP 400 + -32020",
+    "unsupported-version": "HTTP 400 + -32022(data.supported/requested)",
+    "http-401": "HTTP 401 + WWW-Authenticate",
+    "http-403": "HTTP 403",
+    "http-5xx": "HTTP 5xx(discover.httpStatus), 본문은 평문",
+    "sse": "text/event-stream: 알림 1건 뒤 정상 응답",
+    "sse-no-response": "text/event-stream: 알림만 보내고 응답 없이 종료",
+    "id-mismatch": "요청과 다른 id의 정상 응답",
+    "invalid-json": "HTTP 200 + JSON이 아닌 본문",
+    "disconnect": "응답 없이 연결 종료",
+}
+
+# modernResponse.resultType: how the modern result's resultType is emitted.
+MODERN_RESULT_TYPE_MODES = {
+    "normal": "스펙대로(complete 등)",
+    "omit": "resultType 필드 제거",
+    "input_required": "resultType을 input_required로 바꿈(requestState 포함)",
+    "unknown": "알 수 없는 값(bogus_result_type)",
+}
+MODERN_RESULT_METHODS = ("server/discover", "tools/list", "tools/call")
+UNKNOWN_RESULT_TYPE = "bogus_result_type"
+
+# legacyModernProbe.mode: what a legacy-only server (serverEra="legacy") answers
+# to a request that carries 2026 markers or asks for server/discover.
+LEGACY_MODERN_PROBE_MODES = {
+    "method-not-found": "레거시 경로로 처리, server/discover는 HTTP 200 + -32601 (기본)",
+    "invalid-params": "모르는 메서드에 HTTP 200 + -32602 (Python SDK 1.x 형태)",
+    "http-400": "레거시가 아닌 MCP-Protocol-Version 헤더면 HTTP 400 + JSON-RPC -32600 (Python SDK 1.x 형태)",
+    "http-404": "HTTP 404, JSON-RPC 본문 없음",
+    "empty-400": "HTTP 400, 본문 없음",
+    "timeout": "legacyModernProbe.delaySeconds 동안 무응답 후 연결 종료",
+}
+# Modes decided before the legacy Accept rule (they answer on the transport level).
+LEGACY_MODERN_PROBE_TRANSPORT_MODES = ("http-400", "http-404", "empty-400", "timeout")
+
+# toolCall.mode: tools/call injection shared by both eras.
+TOOL_CALL_MODES = {
+    "normal": "정상 실행",
+    "is-error": "isError: true 결과",
+    "json-rpc-error": "HTTP 200 + JSON-RPC error(toolCall.errorCode)",
+    "http-status": "HTTP toolCall.httpStatus, 본문은 평문",
+    "sse": "text/event-stream: 알림 toolCall.sseNotificationCount건 뒤 최종 응답",
+    "id-mismatch": "요청과 다른 id의 정상 응답",
+    "empty": "HTTP 200 + 빈 본문",
+    "disconnect": "응답 없이 연결 종료",
+}
+
+# Client capabilities the server can be told to require (-32021).
+CLIENT_CAPABILITY_NAMES = ("elicitation", "sampling", "roots")
+MAX_INJECTED_DELAY_SECONDS = 120.0
+
 DEFAULT_CONFIG: dict[str, Any] = {
     # "2025" -> initialize handshake + session id (legacy).
     # "2026" -> stateless per-request _meta, no handshake/session.
     "protocolEra": "2025",
+    # True (default): the modern (2026-07-28) path follows the published spec —
+    # required headers, -32022 data, base64 sentinel, Mcp-Param-*, 404 for unknown
+    # or removed methods, -32602 for unknown tools, DiscoverResult shape, ...
+    # False: the looser earlier behaviour, kept for comparison runs.
+    # The legacy (handshake) path is not affected by this flag.
+    "strict2026": True,
+    # Origin allow-list for /mcp. Empty (default) = every Origin is accepted, so
+    # the test server stays reachable from any page. Non-empty: a request whose
+    # Origin header is not listed gets 403 (spec: Origin validation MUST).
+    "allowedOrigins": [],
     # When True, the server refuses any request that is NOT on the 2026 transport
     # (i.e. legacy initialize-handshake clients) with -32022. Used to verify that
     # an older client which doesn't speak 2026-07-28 actually errors out against a
     # 2026-only server, instead of silently succeeding via the hospitable legacy path.
     "rejectLegacy": False,
+    # Which protocol generations this server pretends to implement.
+    #   "both"   -> serve 2026 (stateless) and legacy (handshake) requests. Default.
+    #   "legacy" -> behave like a server that predates 2026-07-28: 2026 markers
+    #               (Mcp-Method, _meta protocolVersion) are ignored, everything
+    #               runs on the legacy path, and server/discover is an unknown
+    #               method (-32601).
+    #   "modern" -> 2026 only; same as rejectLegacy=True.
+    # rejectLegacy is kept as a backward-compatible alias of "modern". When the
+    # two disagree, an explicit serverEra of "legacy"/"modern" wins; rejectLegacy
+    # only promotes the default "both" to "modern". normalize_config rewrites
+    # rejectLegacy to (serverEra == "modern") so the pair is always consistent.
+    "serverEra": "both",
     "mcp": {
         "identifier": SERVER_NAME,
         "serviceName": SERVICE_NAME,
@@ -596,6 +728,66 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "duplicateToolName": False,
         "cacheTtlMs": 0,
         "cacheScope": "private",
+        # 0 = no pagination (default). N > 0: N tools per page + nextCursor,
+        # both eras. An unknown cursor is -32602.
+        "pageSize": 0,
+        # 0 = off. N > 0: the Nth page (1-based) answers with a JSON-RPC error so
+        # a client that already holds earlier pages sees a partial list.
+        "failAtPage": 0,
+    },
+    # Modern (2026-07-28) path options.
+    "modern": {
+        # Expose the modern-only test tools (echo_header_params, confirm_action)
+        # in tools/list. They are never listed on the legacy path.
+        "testTools": True,
+        # Capabilities every modern request except server/discover must declare
+        # in _meta clientCapabilities, else 400 + -32021.
+        "requiredClientCapabilities": [],
+        # HTTP status for -32602 answers whose status the spec does not pin down
+        # (unknown tool, invalid cursor, bad requestState). 200 or 400.
+        "invalidParamsHttpStatus": 200,
+        # Mcp-Param-* header present although the body has no value for it. The
+        # spec table does not cover this case; True (default) treats it as a
+        # header/body mismatch (-32020), False ignores the header.
+        "rejectUnexpectedParamHeader": True,
+    },
+    "discover": {
+        "mode": "normal",
+        "errorCode": ERR_INTERNAL,
+        "httpStatus": 503,
+        "delaySeconds": 0.0,
+        "cacheTtlMs": 0,
+        "cacheScope": "private",
+    },
+    # Spec violations injected into otherwise valid modern results.
+    "modernResponse": {
+        "resultType": "normal",
+        "omitServerInfo": False,
+        "omitCacheFields": False,
+        "issueSessionId": False,
+        # Methods the violations apply to; empty = all of MODERN_RESULT_METHODS.
+        "methods": [],
+    },
+    # Only read when serverEra == "legacy".
+    "legacyModernProbe": {
+        "mode": "method-not-found",
+        "delaySeconds": 10.0,
+    },
+    # tools/call injection, both eras.
+    "toolCall": {
+        "mode": "normal",
+        "errorCode": ERR_INTERNAL,
+        "httpStatus": 500,
+        "delaySeconds": 0.0,
+        "targetTools": [],
+        "sseNotificationCount": 2,
+    },
+    # Legacy session handling.
+    "session": {
+        # False (default) = sessions are issued but never checked.
+        "validate": False,
+        # False = initialize does not return Mcp-Session-Id (validation is then off).
+        "issueId": True,
     },
     "toolErrors": [],
     # OAuth mock. This server acts as its OWN Authorization Server and issues its
@@ -609,6 +801,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     #                  only tools/call for a protected tool needs a bearer token.
     "auth": {
         "mode": "off",
+        # True: a valid token whose scope lacks "mcp" gets 403 insufficient_scope.
+        "enforceScope": False,
         "protectedTools": [
             "convert_length",
             "convert_weight",
@@ -617,6 +811,30 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "convert_volume",
         ],
     },
+    # Developer-authored /mcp responses ("always answer this"). Each rule matches a
+    # JSON-RPC method (exact name, or "*" as fallback) and bypasses every other
+    # check (delay, customHeader, httpStatus, auth, rejectLegacy, 2026 validation).
+    "rawResponses": [],
+}
+
+# Raw response rule limits.
+RAW_RESPONSE_MAX_RULES = 20
+RAW_RESPONSE_MAX_METHOD_LENGTH = 128
+RAW_RESPONSE_MAX_BODY_LENGTH = 65536
+RAW_RESPONSE_CONTENT_TYPES = ("json", "sse")
+RAW_RESPONSE_ID_PLACEHOLDER = '"{{id}}"'
+# RFC 7230 token characters (header field-name).
+HTTP_TOKEN_CHARS = frozenset(
+    "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+
+# Protocol generations the server can pretend to implement (config "serverEra").
+SERVER_ERAS = ("both", "legacy", "modern")
+# X-MCP-Test-Scenario values that switch serverEra for a single request. They are
+# header-only shortcuts, deliberately not listed in SCENARIO_DESCRIPTIONS.
+SERVER_ERA_SCENARIOS = {
+    "server-era-legacy": "legacy",
+    "server-era-modern": "modern",
 }
 
 # OAuth mode identifiers, reused by config validation and the control-page UI.
@@ -831,6 +1049,74 @@ def tools(service_name: str = SERVICE_NAME) -> list[dict[str, Any]]:
     ]
 
 
+def modern_test_tools(service_name: str = SERVICE_NAME) -> list[dict[str, Any]]:
+    """Test-only tools listed on the modern (2026-07-28) path only.
+
+    They exercise two features that do not exist before 2026-07-28: arguments
+    mirrored into ``Mcp-Param-*`` headers (``x-mcp-header``) and the
+    input_required (MRTR) round trip. The legacy tools/list is left untouched.
+    """
+    return [
+        {
+            "name": HEADER_PARAMS_TOOL,
+            "description": (
+                f"{service_name} test tool that echoes its arguments. region, greeting, "
+                "count and verbose are mirrored into Mcp-Param-* headers."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "region": {
+                        "type": "string",
+                        "description": "Plain ASCII string mirrored into Mcp-Param-Region.",
+                        X_MCP_HEADER: "Region",
+                    },
+                    "greeting": {
+                        "type": "string",
+                        "description": (
+                            "Free text (non-ASCII allowed) mirrored into Mcp-Param-Greeting; "
+                            "non-ASCII values travel as =?base64?...?=."
+                        ),
+                        X_MCP_HEADER: "Greeting",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Integer mirrored into Mcp-Param-Count.",
+                        X_MCP_HEADER: "Count",
+                    },
+                    "verbose": {
+                        "type": "boolean",
+                        "description": "Boolean mirrored into Mcp-Param-Verbose.",
+                        X_MCP_HEADER: "Verbose",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Free text that is NOT mirrored into a header.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "annotations": annotations("Echo Header Params"),
+        },
+        {
+            "name": MRTR_TOOL,
+            "description": (
+                f"{service_name} test tool for the input_required flow. The first call "
+                "returns an elicitation request; the retry with inputResponses completes."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "Label of the action to confirm."},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+            "annotations": annotations("Confirm Action"),
+        },
+    ]
+
+
 def annotations(title: str) -> dict[str, bool | str]:
     return {
         "title": title,
@@ -851,40 +1137,105 @@ def default_config() -> dict[str, Any]:
     return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
-def scenario_to_config(raw_scenario: str | None) -> dict[str, Any]:
-    scenario = normalize_scenario(raw_scenario)
-    config = default_config()
+def _merge_config_patch(config: dict[str, Any], patch: dict[str, Any]) -> None:
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(config.get(key), dict):
+            _merge_config_patch(config[key], value)
+        else:
+            config[key] = json.loads(json.dumps(value))
+
+
+def header_scenario_patches() -> dict[str, dict[str, Any]]:
+    """X-MCP-Test-Scenario names that are header-only shortcuts for config patches.
+
+    Deliberately not listed in SCENARIO_DESCRIPTIONS (same as SERVER_ERA_SCENARIOS).
+    """
+    patches: dict[str, dict[str, Any]] = {}
+    for mode in DISCOVER_MODES:
+        if mode != "normal":
+            patches[f"discover-{mode}"] = {"discover": {"mode": mode}}
+    for mode in TOOL_CALL_MODES:
+        if mode != "normal":
+            patches[f"tool-call-{mode}"] = {"toolCall": {"mode": mode}}
+    for mode in LEGACY_MODERN_PROBE_MODES:
+        patches[f"legacy-probe-{mode}"] = {
+            "serverEra": "legacy",
+            "legacyModernProbe": {"mode": mode},
+        }
+    for mode in MODERN_RESULT_TYPE_MODES:
+        if mode != "normal":
+            patches[f"modern-result-type-{mode.replace('_', '-')}"] = {
+                "modernResponse": {"resultType": mode}
+            }
+    patches["modern-omit-server-info"] = {"modernResponse": {"omitServerInfo": True}}
+    patches["modern-omit-cache-fields"] = {"modernResponse": {"omitCacheFields": True}}
+    patches["modern-issue-session-id"] = {"modernResponse": {"issueSessionId": True}}
+    patches["lenient-2026"] = {"strict2026": False}
+    patches["session-validate"] = {"session": {"validate": True}}
+    patches["session-no-id"] = {"session": {"issueId": False}}
+    patches["tools-list-paged"] = {"toolsList": {"pageSize": 2}}
+    for name in CLIENT_CAPABILITY_NAMES:
+        patches[f"require-capability-{name}"] = {"modern": {"requiredClientCapabilities": [name]}}
+    return patches
+
+
+HEADER_SCENARIO_INITIALIZE_VERSION_PREFIX = "initialize-version-"
+HEADER_SCENARIO_CONFIG_PREFIX = "cfg:"
+
+
+def _apply_scenario(config: dict[str, Any], scenario: str) -> None:
     if scenario == "auth-401":
         config["server"]["httpStatus"] = 401
-        return config
-    if scenario == "auth-403":
+    elif scenario == "auth-403":
         config["server"]["httpStatus"] = 403
-        return config
-    if scenario == "delayed-response":
+    elif scenario == "delayed-response":
         config["server"]["delayEnabled"] = True
-        return config
-    if scenario == "unsupported-min-version":
+    elif scenario == "unsupported-min-version":
         config["initialize"]["protocolVersionEnabled"] = True
         config["initialize"]["protocolVersion"] = "2024-11-05"
-        return config
-    if scenario == "tools-list-error":
+    elif scenario == "tools-list-error":
         config["toolsList"]["mode"] = "json-rpc-error"
-        return config
-    if scenario == "tools-list-null":
+    elif scenario == "tools-list-null":
         config["toolsList"]["mode"] = "null"
-        return config
-    if scenario == "tools-list-empty":
+    elif scenario == "tools-list-empty":
         config["toolsList"]["mode"] = "empty"
-        return config
-    if scenario == "too-many-tools":
+    elif scenario == "too-many-tools":
         config["toolsList"]["mode"] = "too-many"
-        return config
-    if scenario == "duplicate-tool-name":
+    elif scenario == "duplicate-tool-name":
         config["toolsList"]["duplicateToolName"] = True
-        return config
-    if scenario in TOOL_ERROR_SCENARIOS:
-        config["toolErrors"] = [scenario]
-        return config
+    elif scenario in TOOL_ERROR_SCENARIOS:
+        if scenario not in config["toolErrors"]:
+            config["toolErrors"].append(scenario)
+    elif scenario in SERVER_ERA_SCENARIOS:
+        config["serverEra"] = SERVER_ERA_SCENARIOS[scenario]
+        config["rejectLegacy"] = config["serverEra"] == "modern"
+    elif scenario.startswith(HEADER_SCENARIO_INITIALIZE_VERSION_PREFIX):
+        version = scenario[len(HEADER_SCENARIO_INITIALIZE_VERSION_PREFIX):]
+        if version:
+            config["initialize"]["protocolVersionEnabled"] = True
+            config["initialize"]["protocolVersion"] = version
+    else:
+        patch = header_scenario_patches().get(scenario)
+        if patch is not None:
+            _merge_config_patch(config, patch)
+            config["rejectLegacy"] = config["serverEra"] == "modern"
+
+
+def scenario_to_config(raw_scenario: str | None) -> dict[str, Any]:
+    """Config for an X-MCP-Test-Scenario value.
+
+    One scenario name, or several joined with commas (applied left to right), or
+    ``cfg:<token>`` carrying a full config token (same encoding as the ``cfg``
+    query parameter). Unknown names are ignored, as before.
+    """
+    raw_text = (raw_scenario or "").strip()
+    if raw_text.lower().startswith(HEADER_SCENARIO_CONFIG_PREFIX):
+        return decode_config_token(raw_text[len(HEADER_SCENARIO_CONFIG_PREFIX):])
+    config = default_config()
+    for part in raw_text.split(","):
+        scenario = normalize_scenario(part)
+        if scenario != "ok":
+            _apply_scenario(config, scenario)
     return config
 
 
@@ -904,7 +1255,22 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
         raise ValueError("protocolEra must be 2025 or 2026")
     config["protocolEra"] = protocol_era
 
+    config["strict2026"] = _config_bool(raw_config, "strict2026", config["strict2026"], "strict2026")
+    config["allowedOrigins"] = _config_str_list(
+        raw_config.get("allowedOrigins", []), "allowedOrigins", max_items=50, max_length=512
+    )
+
     config["rejectLegacy"] = bool(raw_config.get("rejectLegacy", config["rejectLegacy"]))
+
+    server_era = str(raw_config.get("serverEra", config["serverEra"])).strip()
+    if server_era not in SERVER_ERAS:
+        raise ValueError("serverEra must be both, legacy, or modern")
+    # rejectLegacy is the legacy alias of serverEra="modern": it only promotes the
+    # default "both". An explicit "legacy"/"modern" wins over the alias.
+    if server_era == "both" and config["rejectLegacy"]:
+        server_era = "modern"
+    config["serverEra"] = server_era
+    config["rejectLegacy"] = server_era == "modern"
 
     mcp = raw_config.get("mcp") if isinstance(raw_config.get("mcp"), dict) else {}
     server = raw_config.get("server") if isinstance(raw_config.get("server"), dict) else {}
@@ -974,6 +1340,12 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
         raise ValueError("toolsList.cacheScope must be private or public")
     config["toolsList"]["cacheTtlMs"] = cache_ttl_ms
     config["toolsList"]["cacheScope"] = cache_scope
+    config["toolsList"]["pageSize"] = _config_int(tools_list, "pageSize", 0, "toolsList.pageSize", 0, 100)
+    config["toolsList"]["failAtPage"] = _config_int(
+        tools_list, "failAtPage", 0, "toolsList.failAtPage", 0, 100
+    )
+
+    _normalize_injection_config(config, raw_config)
 
     raw_tool_errors = raw_config.get("toolErrors", [])
     if not isinstance(raw_tool_errors, list):
@@ -996,12 +1368,340 @@ def normalize_config(raw_config: Any) -> dict[str, Any]:
         if mode not in AUTH_MODES:
             raise ValueError(f"auth.mode must be one of {', '.join(AUTH_MODES)}")
         config["auth"]["mode"] = mode
+        config["auth"]["enforceScope"] = _config_bool(
+            raw_auth, "enforceScope", config["auth"]["enforceScope"], "auth.enforceScope"
+        )
         raw_protected = raw_auth.get("protectedTools")
         if isinstance(raw_protected, list):
             protected = [name for name in raw_protected if isinstance(name, str)]
             config["auth"]["protectedTools"] = protected
 
+    config["rawResponses"] = normalize_raw_responses(raw_config.get("rawResponses", []))
+
     return config
+
+
+def _config_section(raw_config: dict[str, Any], key: str) -> dict[str, Any]:
+    section = raw_config.get(key)
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ValueError(f"{key} must be an object")
+    return section
+
+
+def _config_bool(section: dict[str, Any], key: str, default: bool, where: str) -> bool:
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{where} must be a boolean")
+    return value
+
+
+def _config_int(
+    section: dict[str, Any], key: str, default: int, where: str, low: int, high: int
+) -> int:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError(f"{where} must be an integer between {low} and {high}")
+    return value
+
+
+def _config_seconds(section: dict[str, Any], key: str, default: float, where: str) -> float:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+        raise ValueError(f"{where} must be a number")
+    if value < 0 or value > MAX_INJECTED_DELAY_SECONDS:
+        raise ValueError(f"{where} must be between 0 and {int(MAX_INJECTED_DELAY_SECONDS)}")
+    return float(value)
+
+
+def _config_choice(
+    section: dict[str, Any], key: str, default: Any, where: str, choices: Any
+) -> Any:
+    value = section.get(key, default)
+    if value not in tuple(choices):
+        allowed = ", ".join(str(choice) for choice in choices)
+        raise ValueError(f"{where} must be one of {allowed}")
+    return value
+
+
+def _config_str_list(
+    value: Any,
+    where: str,
+    *,
+    max_items: int,
+    max_length: int,
+    choices: Any = None,
+) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be a list")
+    if len(value) > max_items:
+        raise ValueError(f"{where} must have {max_items} items or fewer")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{where} items must be non-empty strings")
+        item = item.strip()
+        if len(item) > max_length:
+            raise ValueError(f"{where} items must be {max_length} characters or fewer")
+        if choices is not None and item not in tuple(choices):
+            allowed = ", ".join(choices)
+            raise ValueError(f"{where} items must be one of {allowed}")
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def _normalize_injection_config(config: dict[str, Any], raw_config: dict[str, Any]) -> None:
+    """Validate the option groups (modern, discover, modernResponse, ...)."""
+    modern = _config_section(raw_config, "modern")
+    defaults = config["modern"]
+    config["modern"] = {
+        "testTools": _config_bool(modern, "testTools", defaults["testTools"], "modern.testTools"),
+        "requiredClientCapabilities": _config_str_list(
+            modern.get("requiredClientCapabilities", []),
+            "modern.requiredClientCapabilities",
+            max_items=len(CLIENT_CAPABILITY_NAMES),
+            max_length=64,
+            choices=CLIENT_CAPABILITY_NAMES,
+        ),
+        "invalidParamsHttpStatus": _config_choice(
+            modern,
+            "invalidParamsHttpStatus",
+            defaults["invalidParamsHttpStatus"],
+            "modern.invalidParamsHttpStatus",
+            (200, 400),
+        ),
+        "rejectUnexpectedParamHeader": _config_bool(
+            modern,
+            "rejectUnexpectedParamHeader",
+            defaults["rejectUnexpectedParamHeader"],
+            "modern.rejectUnexpectedParamHeader",
+        ),
+    }
+
+    discover = _config_section(raw_config, "discover")
+    defaults = config["discover"]
+    config["discover"] = {
+        "mode": _config_choice(discover, "mode", defaults["mode"], "discover.mode", DISCOVER_MODES),
+        "errorCode": _config_int(
+            discover, "errorCode", defaults["errorCode"], "discover.errorCode", -32768, 32767
+        ),
+        "httpStatus": _config_int(
+            discover, "httpStatus", defaults["httpStatus"], "discover.httpStatus", 500, 599
+        ),
+        "delaySeconds": _config_seconds(
+            discover, "delaySeconds", defaults["delaySeconds"], "discover.delaySeconds"
+        ),
+        "cacheTtlMs": _config_int(
+            discover, "cacheTtlMs", defaults["cacheTtlMs"], "discover.cacheTtlMs", 0, 86_400_000
+        ),
+        "cacheScope": _config_choice(
+            discover, "cacheScope", defaults["cacheScope"], "discover.cacheScope", ("private", "public")
+        ),
+    }
+
+    modern_response = _config_section(raw_config, "modernResponse")
+    defaults = config["modernResponse"]
+    config["modernResponse"] = {
+        "resultType": _config_choice(
+            modern_response,
+            "resultType",
+            defaults["resultType"],
+            "modernResponse.resultType",
+            MODERN_RESULT_TYPE_MODES,
+        ),
+        "omitServerInfo": _config_bool(
+            modern_response, "omitServerInfo", defaults["omitServerInfo"], "modernResponse.omitServerInfo"
+        ),
+        "omitCacheFields": _config_bool(
+            modern_response,
+            "omitCacheFields",
+            defaults["omitCacheFields"],
+            "modernResponse.omitCacheFields",
+        ),
+        "issueSessionId": _config_bool(
+            modern_response, "issueSessionId", defaults["issueSessionId"], "modernResponse.issueSessionId"
+        ),
+        "methods": _config_str_list(
+            modern_response.get("methods", []),
+            "modernResponse.methods",
+            max_items=len(MODERN_RESULT_METHODS),
+            max_length=64,
+            choices=MODERN_RESULT_METHODS,
+        ),
+    }
+
+    probe = _config_section(raw_config, "legacyModernProbe")
+    defaults = config["legacyModernProbe"]
+    config["legacyModernProbe"] = {
+        "mode": _config_choice(
+            probe, "mode", defaults["mode"], "legacyModernProbe.mode", LEGACY_MODERN_PROBE_MODES
+        ),
+        "delaySeconds": _config_seconds(
+            probe, "delaySeconds", defaults["delaySeconds"], "legacyModernProbe.delaySeconds"
+        ),
+    }
+
+    tool_call = _config_section(raw_config, "toolCall")
+    defaults = config["toolCall"]
+    config["toolCall"] = {
+        "mode": _config_choice(tool_call, "mode", defaults["mode"], "toolCall.mode", TOOL_CALL_MODES),
+        "errorCode": _config_int(
+            tool_call, "errorCode", defaults["errorCode"], "toolCall.errorCode", -32768, 32767
+        ),
+        "httpStatus": _config_int(
+            tool_call, "httpStatus", defaults["httpStatus"], "toolCall.httpStatus", 400, 599
+        ),
+        "delaySeconds": _config_seconds(
+            tool_call, "delaySeconds", defaults["delaySeconds"], "toolCall.delaySeconds"
+        ),
+        "targetTools": _config_str_list(
+            tool_call.get("targetTools", []), "toolCall.targetTools", max_items=50, max_length=256
+        ),
+        "sseNotificationCount": _config_int(
+            tool_call,
+            "sseNotificationCount",
+            defaults["sseNotificationCount"],
+            "toolCall.sseNotificationCount",
+            0,
+            20,
+        ),
+    }
+
+    session = _config_section(raw_config, "session")
+    defaults = config["session"]
+    config["session"] = {
+        "validate": _config_bool(session, "validate", defaults["validate"], "session.validate"),
+        "issueId": _config_bool(session, "issueId", defaults["issueId"], "session.issueId"),
+    }
+
+
+def normalize_raw_responses(raw_rules: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_rules, list):
+        raise ValueError("rawResponses must be a list")
+    if len(raw_rules) > RAW_RESPONSE_MAX_RULES:
+        raise ValueError(f"rawResponses must have {RAW_RESPONSE_MAX_RULES} rules or fewer")
+    return [normalize_raw_response_rule(rule, index) for index, rule in enumerate(raw_rules)]
+
+
+def normalize_raw_response_rule(raw_rule: Any, index: int) -> dict[str, Any]:
+    where = f"rawResponses[{index}]"
+    if not isinstance(raw_rule, dict):
+        raise ValueError(f"{where} must be an object")
+
+    enabled = raw_rule.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{where}.enabled must be a boolean")
+
+    method = raw_rule.get("method")
+    if not isinstance(method, str) or not method.strip():
+        raise ValueError(f"{where}.method must not be empty")
+    method = method.strip()
+    if len(method) > RAW_RESPONSE_MAX_METHOD_LENGTH:
+        raise ValueError(
+            f"{where}.method must be {RAW_RESPONSE_MAX_METHOD_LENGTH} characters or fewer"
+        )
+
+    status = raw_rule.get("status", 200)
+    if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
+        raise ValueError(f"{where}.status must be an integer between 200 and 599")
+
+    raw_headers = raw_rule.get("headers", {})
+    if not isinstance(raw_headers, dict):
+        raise ValueError(f"{where}.headers must be an object")
+    headers: dict[str, str] = {}
+    for name, value in raw_headers.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise ValueError(f"{where}.headers names and values must be strings")
+        if not name or any(char not in HTTP_TOKEN_CHARS for char in name):
+            raise ValueError(f"{where}.headers name '{name}' is not a valid HTTP header name")
+        if "\r" in value or "\n" in value:
+            raise ValueError(f"{where}.headers['{name}'] must not contain CR or LF")
+        headers[name] = value
+
+    content_type = raw_rule.get("contentType", "json")
+    if content_type not in RAW_RESPONSE_CONTENT_TYPES:
+        raise ValueError(f"{where}.contentType must be json or sse")
+
+    body = raw_rule.get("body", "")
+    if not isinstance(body, str):
+        raise ValueError(f"{where}.body must be a string")
+    if len(body) > RAW_RESPONSE_MAX_BODY_LENGTH:
+        raise ValueError(
+            f"{where}.body must be {RAW_RESPONSE_MAX_BODY_LENGTH} characters or fewer"
+        )
+
+    return {
+        "enabled": enabled,
+        "method": method,
+        "status": status,
+        "headers": headers,
+        "contentType": content_type,
+        "body": body,
+    }
+
+
+def match_raw_response(config: dict[str, Any], payload: Any) -> dict[str, Any] | None:
+    """Return the raw response rule for this JSON-RPC payload, if any.
+
+    Exact method match wins over the "*" wildcard; ties go to list order.
+    """
+    if not isinstance(payload, dict):
+        return None
+    method = payload.get("method")
+    if not isinstance(method, str):
+        return None
+    wildcard = None
+    for rule in config.get("rawResponses") or []:
+        if not rule.get("enabled", True):
+            continue
+        if rule.get("method") == method:
+            return rule
+        if wildcard is None and rule.get("method") == "*":
+            wildcard = rule
+    return wildcard
+
+
+def render_raw_body(body: str, request_id: Any) -> str:
+    """Substitute the quoted '"{{id}}"' placeholder with the JSON-encoded request id."""
+    return body.replace(RAW_RESPONSE_ID_PLACEHOLDER, json.dumps(request_id, ensure_ascii=False))
+
+
+def build_raw_response(rule: dict[str, Any], body_text: str) -> tuple[bytes, dict[str, str]]:
+    """Wire body + ordered response headers (excluding CORS) for a raw response rule.
+
+    Header order: Content-Type defaults, server-computed Content-Length, then the
+    user's headers. A user Content-Type replaces the default; a user
+    Content-Length is ignored so the framing always matches the body.
+    """
+    user_headers = {
+        name: value
+        for name, value in rule.get("headers", {}).items()
+        if name.lower() != "content-length"
+    }
+    user_header_names = {name.lower() for name in user_headers}
+
+    if rule["status"] in {204, 304}:
+        body = b""
+    elif rule["contentType"] == "sse":
+        lines = body_text.splitlines() or [""]
+        framed = "event: message\n" + "".join(f"data: {line}\n" for line in lines) + "\n"
+        body = framed.encode("utf-8")
+    else:
+        body = body_text.encode("utf-8")
+
+    headers: dict[str, str] = {}
+    if "content-type" not in user_header_names:
+        if rule["contentType"] == "sse":
+            headers["Content-Type"] = "text/event-stream"
+        else:
+            headers["Content-Type"] = "application/json"
+    if rule["contentType"] == "sse" and "cache-control" not in user_header_names:
+        headers["Cache-Control"] = "no-store"
+    headers["Content-Length"] = str(len(body))
+    headers.update(user_headers)
+    return body, headers
 
 
 def get_active_config() -> dict[str, Any]:
@@ -1281,14 +1981,25 @@ def request_era(payload: Any, headers: dict[str, str] | None = None) -> str:
     return "2025"
 
 
+def config_server_era(config: dict[str, Any] | None) -> str:
+    """Effective serverEra of a (normalized) config; "both" when unset."""
+    if not config:
+        return "both"
+    server_era = config.get("serverEra", "both")
+    if server_era == "both" and config.get("rejectLegacy"):
+        return "modern"
+    return server_era if server_era in SERVER_ERAS else "both"
+
+
 def validate_2026_request(
     payload: Any,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    """Validate a 2026-07-28 request's headers and _meta envelope.
+    """Validate a 2026-07-28 request the earlier (lenient) way.
 
-    Returns a JSON-RPC error dict if the request is malformed, else None.
-    The HTTP layer maps any returned error to a 400 response.
+    Only used with strict2026=False; validate_modern_request is the
+    spec-conformant check. Returns a JSON-RPC error dict if the request is
+    malformed, else None. The HTTP layer maps any returned error to a 400.
     """
     headers = headers or {}
     request_id = payload.get("id") if isinstance(payload, dict) else None
@@ -1359,16 +2070,25 @@ def validate_2026_request(
     return None
 
 
-def json_rpc_result_2026(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+def json_rpc_result_2026(
+    request_id: Any,
+    result: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Wrap a result in the 2026 envelope: resultType + _meta.serverInfo.
 
     The handler-provided result may set its own resultType (e.g. an error
-    scenario that omits it); only fill defaults when absent.
+    scenario that omits it); only fill defaults when absent. With a strict
+    config the serverInfo name is the configured MCP identifier, so it agrees
+    with what the legacy initialize result reports.
     """
     enriched = dict(result)
     enriched.setdefault("resultType", "complete")
     meta = dict(enriched.get("_meta") or {})
-    meta.setdefault(META_SERVER_INFO, {"name": SERVER_NAME, "version": SERVER_VERSION})
+    server_name = SERVER_NAME
+    if config is not None and config.get("strict2026", True):
+        server_name = config["mcp"]["identifier"]
+    meta.setdefault(META_SERVER_INFO, {"name": server_name, "version": SERVER_VERSION})
     enriched["_meta"] = meta
     return {"jsonrpc": "2.0", "id": request_id, "result": enriched}
 
@@ -1410,50 +2130,1080 @@ def subscriptions_acknowledged_notification(payload: dict[str, Any]) -> dict[str
     }
 
 
-def subscriptions_listen_result(request_id: Any) -> dict[str, Any]:
-    return json_rpc_result_2026(request_id, {"_meta": {META_SUBSCRIPTION_ID: request_id}})
+def subscriptions_listen_result(
+    request_id: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    return json_rpc_result_2026(
+        request_id, {"_meta": {META_SUBSCRIPTION_ID: request_id}}, config
+    )
 
 
-def handle_json_rpc(
-    payload: Any,
-    scenario: str = "ok",
-    config: dict[str, Any] | None = None,
+# ---------------------------------------------------------------------------
+# Reply plumbing. handle_mcp_exchange() returns a reply dict so that injected
+# transport behaviour (SSE, delay, dropped connection, plain-text status) can be
+# expressed; handle_json_rpc() is the older tuple view of the same thing.
+# ---------------------------------------------------------------------------
+def _reply(
+    status: int = 200,
+    body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
-) -> tuple[int, dict[str, str], dict[str, Any] | None]:
-    scenario = normalize_scenario(scenario)
-    config = normalize_config(config) if config is not None else scenario_to_config(scenario)
-    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
-        return 400, {}, json_rpc_error(None, -32600, "Invalid Request")
+    *,
+    transport: str = "json",
+    events: list[dict[str, Any]] | None = None,
+    text: str = "",
+    content_type: str = "text/plain;charset=UTF-8",
+    delay: float = 0.0,
+    injected: list[str] | None = None,
+) -> dict[str, Any]:
+    """transport: json | sse | text | disconnect | auth-challenge."""
+    return {
+        "status": status,
+        "body": body,
+        "headers": dict(headers or {}),
+        "transport": transport,
+        "events": list(events or []),
+        "text": text,
+        "contentType": content_type,
+        "delay": delay,
+        "injected": list(injected or []),
+    }
 
+
+class RequestHeaders(dict):
+    """Request headers plus the lower-cased names that arrived more than once.
+
+    A plain mapping folds repeated header lines into one entry, so the raw
+    carrier (``Handler.exchange_headers``) records the repeats here.
+    """
+
+    duplicated: frozenset[str] = frozenset()
+
+
+def _lowered_headers(headers: Any) -> RequestHeaders:
+    """Lower-case the header names; keeps (and extends) the duplicate record."""
+    lowered = RequestHeaders()
+    duplicated = set(getattr(headers, "duplicated", ()))
+    for name, value in dict(headers or {}).items():
+        key = str(name).lower()
+        if key in lowered:
+            duplicated.add(key)
+        lowered[key] = str(value)
+    lowered.duplicated = frozenset(duplicated)
+    return lowered
+
+
+def strip_ows(value: str) -> str:
+    """Drop optional whitespace (SP / HTAB) around a field value (RFC 9110 5.5)."""
+    return value.strip(" \t")
+
+
+def is_clean_header_value(value: str) -> bool:
+    """RFC 9110 field-value characters: visible ASCII, space, horizontal tab."""
+    return all(char == "\t" or " " <= char <= "~" for char in value)
+
+
+def decode_mcp_header_value(value: str) -> str | None:
+    """Decode an Mcp-Name / Mcp-Param-* header value.
+
+    Returns the plain value, the decoded text for a ``=?base64?...?=`` sentinel,
+    or None when the value has invalid characters or a malformed sentinel.
+
+    The sentinel payload is decoded as strictly as the official Python SDK 2.3.0
+    (``mcp.shared.inbound.decode_header_value``): standard alphabet only (the
+    URL-safe ``-``/``_`` are rejected), ``=`` padding required, and only the
+    canonical encoding is accepted (no non-zero trailing bits).
+    """
+    if not is_clean_header_value(value):
+        return None
+    minimum = len(BASE64_SENTINEL_PREFIX) + len(BASE64_SENTINEL_SUFFIX)
+    if (
+        len(value) >= minimum
+        and value.startswith(BASE64_SENTINEL_PREFIX)
+        and value.endswith(BASE64_SENTINEL_SUFFIX)
+    ):
+        encoded = value[len(BASE64_SENTINEL_PREFIX):-len(BASE64_SENTINEL_SUFFIX)]
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+        if base64.b64encode(raw).decode("ascii") != encoded:
+            return None
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return value
+
+
+def header_param_properties(
+    schema: Any, path: tuple[str, ...] = ()
+) -> list[tuple[tuple[str, ...], str]]:
+    """(argument path, header name) for every x-mcp-header reachable via properties."""
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    found: list[tuple[tuple[str, ...], str]] = []
+    if not isinstance(properties, dict):
+        return found
+    for key, sub_schema in properties.items():
+        if not isinstance(sub_schema, dict):
+            continue
+        header_name = sub_schema.get(X_MCP_HEADER)
+        if isinstance(header_name, str) and header_name:
+            found.append((path + (key,), header_name))
+        found.extend(header_param_properties(sub_schema, path + (key,)))
+    return found
+
+
+def header_param_type(schema: Any, path: tuple[str, ...]) -> Any:
+    """The ``type`` keyword of the property at a ``properties``-key path."""
+    node = schema
+    for key in path:
+        properties = node.get("properties") if isinstance(node, dict) else None
+        node = properties.get(key) if isinstance(properties, dict) else None
+    return node.get("type") if isinstance(node, dict) else None
+
+
+# Header values eligible for the numeric comparison. Same gate as the official
+# Python SDK 2.3.0 (mcp.shared.inbound._CANONICAL_DECIMAL): an optional minus,
+# digits, an optional fraction. No exponent, no plus sign, no whitespace.
+_CANONICAL_DECIMAL = re.compile(r"-?[0-9]+(\.[0-9]+)?")
+
+
+def header_matches_argument(decoded: str, value: Any, prop_type: Any = None) -> bool:
+    """Compare a decoded Mcp-Param-* value with the body argument.
+
+    Same strictness as the official Python SDK 2.3.0
+    (``mcp.shared.inbound._mcp_param_value_matches``):
+
+    - An ``integer`` property with an integral body value compares numerically
+      when the header is a canonical decimal: ``42``, ``42.0`` and ``042`` match
+      42; ``42.5`` does not. The comparison is exact (no float round-trip).
+    - Everything else compares against the text a client mirrors into the
+      header: ``true``/``false`` for a boolean, ``str(value)`` for a number, the
+      string itself. So ``+42``, ``4.2e1`` and `` 42`` never match 42.
+    """
+    if (
+        prop_type == "integer"
+        and not isinstance(value, bool)
+        and (isinstance(value, int) or (isinstance(value, float) and value.is_integer()))
+        and _CANONICAL_DECIMAL.fullmatch(decoded) is not None
+    ):
+        whole, _, fraction = decoded.partition(".")
+        if fraction and set(fraction) != {"0"}:
+            return False
+        try:
+            return int(whole) == int(value)
+        except ValueError:
+            return False
+    if isinstance(value, bool):
+        return decoded == ("true" if value else "false")
+    if isinstance(value, (str, int, float)):
+        try:
+            return decoded == str(value)
+        except ValueError:
+            return False
+    return decoded == json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def validate_mcp_param_headers(
+    request_id: Any,
+    tool: dict[str, Any],
+    arguments: dict[str, Any],
+    lowered: dict[str, str],
+    reject_unexpected: bool = True,
+) -> dict[str, Any] | None:
+    """Spec: basic/transports/streamable-http "Server Behavior for Custom Headers".
+
+    Value present -> header required and must match after decoding. Value null or
+    absent -> header not expected. The spec table has no row for a header that is
+    present anyway; with ``reject_unexpected`` (modern.rejectUnexpectedParamHeader,
+    default) it names a value the body does not have and is treated as a
+    header/body mismatch, otherwise it is ignored. Any failure is -32020.
+
+    A recognized header that arrives more than once is rejected whatever its
+    values are (first-copy and last-copy readers would disagree), like the
+    official Python SDK 2.3.0. Optional whitespace around the value is dropped
+    before anything else, as HTTP requires.
+    """
+    duplicated = getattr(lowered, "duplicated", frozenset())
+    input_schema = tool.get("inputSchema")
+    for path, header_name in header_param_properties(input_schema):
+        value: Any = arguments
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+            if value is None:
+                break
+        display = f"Mcp-Param-{header_name}"
+        argument = ".".join(path)
+        header_key = MCP_PARAM_HEADER_PREFIX + header_name.lower()
+        header = lowered.get(header_key)
+        if header is not None and header_key in duplicated:
+            return json_rpc_error(
+                request_id, ERR_HEADER_MISMATCH, f"{display} header appears more than once"
+            )
+        if header is None:
+            if value is None:
+                continue
+            return json_rpc_error(
+                request_id,
+                ERR_HEADER_MISMATCH,
+                f"Missing {display} header for argument '{argument}'",
+            )
+        decoded = decode_mcp_header_value(strip_ows(header))
+        if decoded is None:
+            return json_rpc_error(
+                request_id,
+                ERR_HEADER_MISMATCH,
+                f"Invalid {display} header: invalid characters or malformed base64 sentinel",
+            )
+        if value is None:
+            if not reject_unexpected:
+                continue
+            return json_rpc_error(
+                request_id,
+                ERR_HEADER_MISMATCH,
+                f"Header mismatch: {display} header is present but argument "
+                f"'{argument}' has no value in the body",
+            )
+        if not header_matches_argument(decoded, value, header_param_type(input_schema, path)):
+            return json_rpc_error(
+                request_id,
+                ERR_HEADER_MISMATCH,
+                f"Header mismatch: {display} header value '{decoded}' does not match "
+                f"body value {json.dumps(value, ensure_ascii=False)}",
+            )
+    return None
+
+
+def validate_modern_request(
+    payload: dict[str, Any], lowered: dict[str, str]
+) -> tuple[int, dict[str, Any]] | None:
+    """Strict 2026-07-28 request validation. Returns (HTTP status, error) or None.
+
+    The spec does not order these checks; the order follows the checklist in
+    docs/SPEC_2026-07-28_NOTES.md: id shape, required headers, required _meta,
+    version header vs _meta, supported version, Mcp-Method, Mcp-Name.
+    """
+    request_id = payload.get("id")
+    method = payload.get("method")
+    if not isinstance(request_id, str) and (
+        isinstance(request_id, bool) or not isinstance(request_id, int)
+    ):
+        return 400, json_rpc_error(
+            None, ERR_INVALID_REQUEST, "Invalid Request: id must be a string or an integer"
+        )
+    if not isinstance(method, str):
+        return 400, json_rpc_error(
+            request_id, ERR_INVALID_REQUEST, "Invalid Request: method must be a string"
+        )
+
+    def mismatch(message: str) -> tuple[int, dict[str, Any]]:
+        return 400, json_rpc_error(request_id, ERR_HEADER_MISMATCH, message)
+
+    # A routing header sent more than once is rejected whatever its values are:
+    # first-copy and last-copy readers would disagree (same rule as the official
+    # Python SDK 2.3.0, mcp.shared.inbound.find_duplicated_routing_header).
+    duplicated = getattr(lowered, "duplicated", frozenset())
+    for key, display in (
+        ("mcp-protocol-version", "MCP-Protocol-Version"),
+        ("mcp-method", "Mcp-Method"),
+        ("mcp-name", "Mcp-Name"),
+    ):
+        if key in duplicated:
+            return mismatch(f"{display} header appears more than once")
+
+    header_version = lowered.get("mcp-protocol-version", "").strip()
+    if not header_version:
+        return mismatch("Missing MCP-Protocol-Version header")
+    # Optional whitespace around a field value is not part of the value.
+    header_method = lowered.get("mcp-method")
+    if header_method is None:
+        return mismatch("Missing Mcp-Method header")
+    header_method = strip_ows(header_method)
+    header_name = lowered.get("mcp-name")
+    if header_name is not None:
+        header_name = strip_ows(header_name)
+    if method in NAME_BEARING_METHODS and header_name is None:
+        return mismatch(f"Missing Mcp-Name header for {method}")
+
+    meta = request_meta(payload)
+    meta_version = meta.get(META_PROTOCOL_VERSION)
+    if not isinstance(meta_version, str) or not meta_version.strip():
+        return 400, json_rpc_error(
+            request_id, ERR_INVALID_PARAMS, f"Missing _meta '{META_PROTOCOL_VERSION}'"
+        )
+    if not isinstance(meta.get(META_CLIENT_CAPABILITIES), dict):
+        return 400, json_rpc_error(
+            request_id,
+            ERR_INVALID_PARAMS,
+            f"Missing _meta '{META_CLIENT_CAPABILITIES}' (must be an object)",
+        )
+
+    if header_version != meta_version:
+        return mismatch(
+            f"Header mismatch: MCP-Protocol-Version '{header_version}' "
+            f"does not match body value '{meta_version}'"
+        )
+    if meta_version not in MODERN_PROTOCOL_VERSIONS:
+        return 400, json_rpc_error(
+            request_id,
+            ERR_UNSUPPORTED_VERSION,
+            f"Unsupported protocol version '{meta_version}'. "
+            f"Supported: {', '.join(MODERN_PROTOCOL_VERSIONS)}",
+            {"supported": list(MODERN_PROTOCOL_VERSIONS), "requested": meta_version},
+        )
+
+    if header_method != method:
+        return mismatch(
+            f"Header mismatch: Mcp-Method '{header_method}' does not match body '{method}'"
+        )
+
+    if method in NAME_BEARING_METHODS:
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        body_name = params.get(NAME_BEARING_METHODS[method])
+        decoded_name = decode_mcp_header_value(header_name or "")
+        if decoded_name is None:
+            return mismatch("Invalid Mcp-Name header: invalid characters or malformed base64 sentinel")
+        if decoded_name != body_name:
+            return mismatch(
+                f"Header mismatch: Mcp-Name header value '{decoded_name}' "
+                f"does not match body value '{body_name}'"
+            )
+    return None
+
+
+def modern_envelope_failure(
+    payload: dict[str, Any], headers: Any, config: dict[str, Any]
+) -> tuple[int, dict[str, Any]] | None:
+    """Envelope validation for the modern path, honouring strict2026."""
+    if config.get("strict2026", True):
+        return validate_modern_request(payload, _lowered_headers(headers))
+    error = validate_2026_request(payload, dict(headers or {}))
+    return (400, error) if error is not None else None
+
+
+def declared_legacy_version(payload: dict[str, Any], lowered: dict[str, str]) -> str:
+    """Best-effort ``requested`` for -32022 sent to a legacy-shaped request.
+
+    initialize params.protocolVersion, else the MCP-Protocol-Version header, else
+    2025-03-26 — the version the spec lets a server assume when the header is absent.
+    """
+    params = payload.get("params")
+    if payload.get("method") == "initialize" and isinstance(params, dict):
+        requested = params.get("protocolVersion")
+        if isinstance(requested, str) and requested:
+            return requested
+    return lowered.get("mcp-protocol-version", "").strip() or "2025-03-26"
+
+
+def modern_tool_definitions(config: dict[str, Any]) -> list[dict[str, Any]]:
+    service_name = config["mcp"]["serviceName"]
+    definitions = tools(service_name)
+    if config["modern"]["testTools"]:
+        definitions.extend(modern_test_tools(service_name))
+    return definitions
+
+
+def _invalid_params_reply(
+    request_id: Any, config: dict[str, Any], message: str
+) -> dict[str, Any]:
+    """-32602 whose HTTP status the spec leaves open (modern.invalidParamsHttpStatus)."""
+    return _reply(
+        config["modern"]["invalidParamsHttpStatus"],
+        json_rpc_error(request_id, ERR_INVALID_PARAMS, message),
+    )
+
+
+def encode_tools_cursor(offset: int) -> str:
+    return _b64url_encode(json.dumps({"offset": offset}, separators=(",", ":")).encode("utf-8"))
+
+
+def decode_tools_cursor(cursor: Any) -> int | None:
+    if not isinstance(cursor, str) or not cursor:
+        return None
+    try:
+        payload = json.loads(_b64url_decode(cursor).decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    offset = payload.get("offset") if isinstance(payload, dict) else None
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        return None
+    return offset
+
+
+def paginate_tools_result(
+    result: dict[str, Any], config: dict[str, Any], params: Any, request_id: Any
+) -> tuple[dict[str, Any], dict[str, Any] | None, list[str]]:
+    """Apply toolsList.pageSize / failAtPage. Returns (result, error, injected labels)."""
+    page_size = config["toolsList"]["pageSize"]
+    all_tools = result.get("tools")
+    if page_size <= 0 or not isinstance(all_tools, list):
+        return result, None, []
+    labels = [f"toolsList.pageSize={page_size}"]
+    cursor = params.get("cursor") if isinstance(params, dict) else None
+    offset = 0
+    if cursor is not None:
+        decoded = decode_tools_cursor(cursor)
+        if decoded is None or decoded <= 0 or decoded >= len(all_tools):
+            return result, json_rpc_error(request_id, ERR_INVALID_PARAMS, "Invalid cursor"), labels
+        offset = decoded
+    page_number = offset // page_size + 1
+    fail_at = config["toolsList"]["failAtPage"]
+    if fail_at and fail_at == page_number:
+        labels.append(f"toolsList.failAtPage={fail_at}")
+        return (
+            result,
+            json_rpc_error(
+                request_id, ERR_INTERNAL, f"Injected tools/list failure at page {page_number}"
+            ),
+            labels,
+        )
+    page = dict(result)
+    page["tools"] = all_tools[offset:offset + page_size]
+    if offset + page_size < len(all_tools):
+        page["nextCursor"] = encode_tools_cursor(offset + page_size)
+    return page, None, labels
+
+
+# -- input_required (MRTR) test tool ------------------------------------------
+def _request_state_digest(arguments: dict[str, Any]) -> str:
+    canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def issue_request_state(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Opaque, HMAC-protected requestState bound to the tool, its arguments and a TTL."""
+    payload = {
+        "tool": tool_name,
+        "args": _request_state_digest(arguments),
+        "exp": int(time.time()) + MRTR_STATE_TTL_SECONDS,
+    }
+    body = _b64url_encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(JWT_SECRET.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{body}.{_b64url_encode(signature)}"
+
+
+def verify_request_state(state: Any, tool_name: str, arguments: dict[str, Any]) -> bool:
+    if not isinstance(state, str) or state.count(".") != 1:
+        return False
+    body, signature = state.split(".")
+    try:
+        expected = hmac.new(
+            JWT_SECRET.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(expected, _b64url_decode(signature)):
+            return False
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    exp = payload.get("exp")
+    return (
+        payload.get("tool") == tool_name
+        and payload.get("args") == _request_state_digest(arguments)
+        and isinstance(exp, int)
+        and exp >= int(time.time())
+    )
+
+
+def confirm_action_reply(
+    request_id: Any,
+    params: dict[str, Any],
+    arguments: dict[str, Any],
+    meta: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """tools/call for the MRTR test tool (spec: basic/patterns/mrtr)."""
+    action = arguments.get("action")
+    if not isinstance(action, str) or not action.strip():
+        return _reply(
+            200,
+            json_rpc_result_2026(request_id, tool_error("action must be a non-empty string."), config),
+        )
+
+    # The tool cannot run without elicitation, and an elicitation/create input
+    # request MUST NOT be sent to a client that did not declare the capability.
+    capabilities = meta.get(META_CLIENT_CAPABILITIES)
+    if not isinstance(capabilities, dict) or not isinstance(capabilities.get("elicitation"), dict):
+        return _reply(
+            400,
+            json_rpc_error(
+                request_id,
+                ERR_MISSING_CAPABILITY,
+                f"Tool '{MRTR_TOOL}' requires the client capability 'elicitation'",
+                {"requiredCapabilities": {"elicitation": {}}},
+            ),
+        )
+
+    state = params.get("requestState")
+    if state is not None:
+        if not verify_request_state(state, MRTR_TOOL, arguments):
+            return _invalid_params_reply(request_id, config, "Invalid or expired requestState")
+        responses = params.get("inputResponses")
+        answer = responses.get(MRTR_INPUT_KEY) if isinstance(responses, dict) else None
+        decision = answer.get("action") if isinstance(answer, dict) else None
+        text = None
+        if decision == "accept":
+            content = answer.get("content")
+            if isinstance(content, dict) and isinstance(content.get("confirmed"), bool):
+                text = (
+                    f"Action '{action}' confirmed."
+                    if content["confirmed"]
+                    else f"Action '{action}' was not confirmed."
+                )
+        elif decision == "decline":
+            text = f"Action '{action}' was declined."
+        elif decision == "cancel":
+            text = f"Action '{action}' was cancelled."
+        if text is not None:
+            return _reply(
+                200,
+                json_rpc_result_2026(
+                    request_id,
+                    {"content": [{"type": "text", "text": text}], "isError": False},
+                    config,
+                ),
+            )
+        # Missing or incomplete answer: ask again instead of failing (SHOULD).
+
+    result = {
+        "resultType": "input_required",
+        "inputRequests": {
+            MRTR_INPUT_KEY: {
+                "method": "elicitation/create",
+                "params": {
+                    "mode": "form",
+                    "message": f"Confirm the action '{action}'?",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {
+                            "confirmed": {
+                                "type": "boolean",
+                                "description": "true to run the action",
+                            }
+                        },
+                        "required": ["confirmed"],
+                    },
+                },
+            }
+        },
+        "requestState": issue_request_state(MRTR_TOOL, arguments),
+    }
+    return _reply(200, json_rpc_result_2026(request_id, result, config))
+
+
+def echo_header_params_result(arguments: dict[str, Any]) -> dict[str, Any]:
+    expected_types: dict[str, type] = {
+        "region": str,
+        "greeting": str,
+        "count": int,
+        "verbose": bool,
+        "note": str,
+    }
+    for name, value in arguments.items():
+        expected = expected_types.get(name)
+        if expected is None:
+            return tool_error(f"unknown argument '{name}'.")
+        if value is None:
+            continue
+        if expected is int and isinstance(value, bool):
+            return tool_error("count must be an integer.")
+        if expected is int and isinstance(value, float) and value.is_integer():
+            continue
+        if not isinstance(value, expected):
+            return tool_error(f"{name} must be of type {expected.__name__}.")
+    text = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+    return {"content": [{"type": "text", "text": text}], "isError": False}
+
+
+# -- tools/call injection (both eras) -----------------------------------------
+def tool_call_plan(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    """The toolCall injection that applies to this tools/call, if any."""
+    tool_call = config["toolCall"]
+    mode = tool_call["mode"]
+    delay = tool_call["delaySeconds"]
+    if mode == "normal" and delay <= 0:
+        return None
+    params = payload.get("params")
+    name = params.get("name") if isinstance(params, dict) else None
+    targets = tool_call["targetTools"]
+    if targets and name not in targets:
+        return None
+    labels = []
+    if mode != "normal":
+        labels.append(f"toolCall.mode={mode}")
+    if delay > 0:
+        labels.append(f"toolCall.delaySeconds={delay:g}")
+    return {"mode": mode, "delay": delay, "labels": labels}
+
+
+def request_scoped_notifications(payload: dict[str, Any], count: int) -> list[dict[str, Any]]:
+    """Notifications that may precede the final response on a request's SSE stream.
+
+    notifications/progress when the request carries _meta.progressToken, else
+    notifications/message.
+    """
+    token = request_meta(payload).get("progressToken")
+    notifications: list[dict[str, Any]] = []
+    for index in range(count):
+        if token is not None:
+            notifications.append(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": token,
+                        "progress": index + 1,
+                        "total": count,
+                        "message": f"step {index + 1}/{count}",
+                    },
+                }
+            )
+        else:
+            notifications.append(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/message",
+                    "params": {
+                        "level": "info",
+                        "logger": SERVER_NAME,
+                        "data": f"step {index + 1}/{count}",
+                    },
+                }
+            )
+    return notifications
+
+
+def mismatched_id(request_id: Any) -> Any:
+    if isinstance(request_id, int) and not isinstance(request_id, bool):
+        return request_id + 1_000_000
+    return f"mismatch-{request_id}"
+
+
+def apply_tool_call_plan(
+    plan: dict[str, Any] | None,
+    normal: dict[str, Any],
+    payload: dict[str, Any],
+    config: dict[str, Any],
+    wrap_result: Any,
+) -> dict[str, Any]:
+    """Turn the normal tools/call reply into the injected one.
+
+    The mode only replaces a call that would have produced a result. A protocol
+    error (header mismatch, unknown tool on the modern path, missing capability)
+    is returned as it is; the delay still applies.
+    """
+    if plan is None:
+        return normal
+    request_id = payload.get("id")
+    mode = plan["mode"]
+    tool_call = config["toolCall"]
+    reply = normal
+    labels = plan["labels"]
+    if not isinstance(normal["body"], dict) or "result" not in normal["body"]:
+        mode = "normal"
+        labels = [label for label in labels if not label.startswith("toolCall.mode=")]
+    if mode == "is-error":
+        reply = _reply(200, wrap_result(request_id, tool_error("Injected tool execution error")))
+    elif mode == "json-rpc-error":
+        reply = _reply(
+            200,
+            json_rpc_error(request_id, tool_call["errorCode"], "Injected tools/call failure"),
+        )
+    elif mode == "http-status":
+        status = tool_call["httpStatus"]
+        reply = _reply(status, transport="text", text=f"Injected HTTP {status}")
+    elif mode == "empty":
+        reply = _reply(200, transport="text", text="", content_type="application/json")
+    elif mode == "disconnect":
+        reply = _reply(0, transport="disconnect")
+    elif mode == "sse":
+        events = request_scoped_notifications(payload, tool_call["sseNotificationCount"])
+        reply = dict(normal)
+        reply["transport"] = "sse"
+        reply["events"] = events + [normal["body"]]
+    elif mode == "id-mismatch":
+        reply = dict(normal)
+        reply["body"] = {**normal["body"], "id": mismatched_id(request_id)}
+    reply["delay"] = reply["delay"] + plan["delay"]
+    reply["injected"] = reply["injected"] + labels
+    return reply
+
+
+# -- legacy-only server facing a modern request --------------------------------
+def legacy_modern_probe_reply(
+    payload: Any, config: dict[str, Any], headers: Any
+) -> dict[str, Any] | None:
+    """Transport-level answer of a legacy-only server to a modern request.
+
+    Only for legacyModernProbe modes in LEGACY_MODERN_PROBE_TRANSPORT_MODES and
+    only when serverEra == "legacy". The JSON-RPC-level modes (method-not-found,
+    invalid-params) are handled on the legacy dispatch path instead.
+    """
+    if config_server_era(config) != "legacy" or not isinstance(payload, dict):
+        return None
+    probe = config["legacyModernProbe"]
+    mode = probe["mode"]
+    if mode not in LEGACY_MODERN_PROBE_TRANSPORT_MODES:
+        return None
+    lowered = _lowered_headers(headers)
+    method = payload.get("method")
+    label = [f"legacyModernProbe.mode={mode}"]
+
+    if mode == "http-400":
+        # Python SDK 1.x: a non-initialize request whose MCP-Protocol-Version
+        # header names a version the server does not know is refused with 400.
+        version = lowered.get("mcp-protocol-version", "").strip()
+        known_versions = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
+        if (
+            not version
+            or version in known_versions
+            or version in LEGACY_PROTOCOL_VERSIONS
+            or method == "initialize"
+        ):
+            return None
+        supported = ", ".join(known_versions)
+        return _reply(
+            400,
+            json_rpc_error(
+                "server-error",
+                ERR_INVALID_REQUEST,
+                f"Bad Request: Unsupported protocol version: {version}. "
+                f"Supported versions: {supported}",
+            ),
+            injected=label,
+        )
+
+    is_modern_request = (
+        request_era(payload, dict(headers or {})) == "2026" or method == "server/discover"
+    )
+    if not is_modern_request:
+        return None
+    if mode == "http-404":
+        return _reply(404, transport="text", text="Not Found", injected=label)
+    if mode == "empty-400":
+        return _reply(400, transport="text", text="", injected=label)
+    return _reply(0, transport="disconnect", delay=probe["delaySeconds"], injected=label)
+
+
+def legacy_session_failure(
+    config: dict[str, Any], method: Any, lowered: dict[str, str]
+) -> dict[str, Any] | None:
+    """session.validate: 400 without a session id, 404 for an unknown/ended one."""
+    session = config["session"]
+    if not session["validate"] or not session["issueId"] or method == "initialize":
+        return None
+    failure = session_error(lowered.get("mcp-session-id"))
+    if failure is None:
+        return None
+    return _reply(failure[0], failure[1], injected=["session.validate"])
+
+
+def session_error(session_id: str | None) -> tuple[int, dict[str, Any]] | None:
+    """(HTTP status, body) for a request whose session id is not usable, else None.
+
+    Bodies are byte-for-byte those of the official Python SDK 1.27.2
+    (scripts/sdk1_legacy_server.py, observed 2026-11-23): the id is the string
+    "server-error" and the code is -32600 in all three cases.
+    """
+    if not session_id:
+        status, message = 400, "Bad Request: Missing session ID"
+    elif session_id in TERMINATED_SESSIONS:
+        status, message = 404, "Not Found: Session has been terminated"
+    elif session_id not in SESSIONS:
+        status, message = 404, "Session not found"
+    else:
+        return None
+    return status, json_rpc_error("server-error", ERR_INVALID_REQUEST, message)
+
+
+def terminate_session(session_id: str) -> None:
+    """DELETE /mcp: later requests with this id get the "terminated" 404."""
+    SESSIONS.discard(session_id)
+    TERMINATED_SESSIONS.add(session_id)
+
+
+def expire_sessions() -> int:
+    """Forget every issued session id; with session.validate the next request is 404.
+
+    Ended sessions are forgotten too, so afterwards every old id is simply unknown.
+    """
+    count = len(SESSIONS)
+    SESSIONS.clear()
+    TERMINATED_SESSIONS.clear()
+    return count
+
+
+# -- modern (2026-07-28) strict path -------------------------------------------
+def missing_client_capabilities(required: list[str], meta: dict[str, Any]) -> dict[str, Any]:
+    capabilities = meta.get(META_CLIENT_CAPABILITIES)
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+    return {name: {} for name in required if not isinstance(capabilities.get(name), dict)}
+
+
+def modern_discover_reply(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    request_id = payload.get("id")
+    discover = config["discover"]
+    mode = discover["mode"]
+    delay = discover["delaySeconds"]
+    labels = []
+    if mode != "normal":
+        labels.append(f"discover.mode={mode}")
+    if delay > 0:
+        labels.append(f"discover.delaySeconds={delay:g}")
+
+    result: dict[str, Any] = {
+        "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
+        "capabilities": {"tools": {"listChanged": True}},
+        "ttlMs": discover["cacheTtlMs"],
+        "cacheScope": discover["cacheScope"],
+    }
+    if mode == "no-modern-version":
+        result["supportedVersions"] = ["2025-03-26", "2025-06-18", "2025-11-25"]
+    elif mode == "empty-versions":
+        result["supportedVersions"] = []
+    elif mode == "missing-versions":
+        result.pop("supportedVersions")
+    body = json_rpc_result_2026(request_id, result, config)
+
+    if mode == "json-rpc-error":
+        reply = _reply(
+            200, json_rpc_error(request_id, discover["errorCode"], "Injected server/discover failure")
+        )
+    elif mode == "header-mismatch":
+        reply = _reply(
+            400,
+            json_rpc_error(
+                request_id, ERR_HEADER_MISMATCH, "Header mismatch: injected by discover.mode"
+            ),
+        )
+    elif mode == "unsupported-version":
+        requested = str(request_meta(payload).get(META_PROTOCOL_VERSION, ""))
+        supported = ["2099-01-01"]
+        reply = _reply(
+            400,
+            json_rpc_error(
+                request_id,
+                ERR_UNSUPPORTED_VERSION,
+                f"Unsupported protocol version '{requested}'. Supported: {', '.join(supported)}",
+                {"supported": supported, "requested": requested},
+            ),
+        )
+    elif mode == "http-401":
+        reply = _reply(401, transport="auth-challenge")
+    elif mode == "http-403":
+        reply = _reply(403, transport="text", text="Forbidden")
+    elif mode == "http-5xx":
+        status = discover["httpStatus"]
+        reply = _reply(status, transport="text", text=f"Injected HTTP {status}")
+    elif mode == "sse":
+        reply = _reply(
+            200, body, transport="sse", events=request_scoped_notifications(payload, 1) + [body]
+        )
+    elif mode == "sse-no-response":
+        reply = _reply(200, transport="sse", events=request_scoped_notifications(payload, 1))
+    elif mode == "id-mismatch":
+        reply = _reply(200, {**body, "id": mismatched_id(request_id)})
+    elif mode == "invalid-json":
+        reply = _reply(
+            200, transport="text", text='{"jsonrpc":"2.0","id":', content_type="application/json"
+        )
+    elif mode == "disconnect":
+        reply = _reply(0, transport="disconnect")
+    else:
+        reply = _reply(200, body)
+    reply["delay"] = reply["delay"] + delay
+    reply["injected"] = reply["injected"] + labels
+    return reply
+
+
+def modern_tools_list_reply(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    request_id = payload.get("id")
+    params = payload.get("params")
+    tools_list = config["toolsList"]
+    if tools_list["mode"] == "json-rpc-error":
+        return _reply(200, json_rpc_error(request_id, ERR_INTERNAL, "Injected tools/list failure"))
+    scenario_tools = tools_for_config(config)
+    result = dict(scenario_tools or {"tools": modern_tool_definitions(config)})
+    result, error, labels = paginate_tools_result(result, config, params, request_id)
+    if error is not None:
+        status = 200
+        if error["error"]["code"] == ERR_INVALID_PARAMS:
+            status = config["modern"]["invalidParamsHttpStatus"]
+        return _reply(status, error, injected=labels)
+    cursor = params.get("cursor") if isinstance(params, dict) else None
+    if cursor is not None and tools_list["pageSize"] <= 0:
+        # This server issued no cursor, so any cursor is one it does not know.
+        return _invalid_params_reply(request_id, config, "Invalid cursor")
+    # Cacheable-list hints are required fields on a complete ListToolsResult.
+    result.setdefault("ttlMs", tools_list["cacheTtlMs"])
+    result.setdefault("cacheScope", tools_list["cacheScope"])
+    return _reply(200, json_rpc_result_2026(request_id, result, config), injected=labels)
+
+
+def modern_tools_call_reply(
+    payload: dict[str, Any], config: dict[str, Any], lowered: dict[str, str]
+) -> dict[str, Any]:
+    request_id = payload.get("id")
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    name = params.get("name")
+    if not isinstance(name, str):
+        return _invalid_params_reply(request_id, config, "tools/call requires a string params.name")
+    tool = next((tool for tool in modern_tool_definitions(config) if tool["name"] == name), None)
+    if tool is None:
+        # Protocol error, not a tool execution error (spec: server/tools#error-handling).
+        return _invalid_params_reply(request_id, config, f"Unknown tool: {name}")
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return _invalid_params_reply(request_id, config, "tools/call arguments must be an object")
+
+    error = validate_mcp_param_headers(
+        request_id,
+        tool,
+        arguments,
+        lowered,
+        reject_unexpected=config["modern"]["rejectUnexpectedParamHeader"],
+    )
+    if error is not None:
+        return _reply(400, error)
+
+    if name == MRTR_TOOL:
+        return confirm_action_reply(request_id, params, arguments, request_meta(payload), config)
+    if name == HEADER_PARAMS_TOOL:
+        result = echo_header_params_result(arguments)
+    else:
+        result = call_tool(params)
+    return _reply(200, json_rpc_result_2026(request_id, result, config))
+
+
+def apply_modern_response_injection(
+    reply: dict[str, Any], config: dict[str, Any], method: str
+) -> dict[str, Any]:
+    """modernResponse.*: break an otherwise valid modern result on purpose."""
+    injection = config["modernResponse"]
+    methods = injection["methods"] or list(MODERN_RESULT_METHODS)
+    body = reply["body"]
+    if method not in methods or not isinstance(body, dict) or "result" not in body:
+        return reply
+    result = dict(body["result"])
+    labels: list[str] = []
+    headers = dict(reply["headers"])
+
+    result_type = injection["resultType"]
+    if result_type == "omit":
+        result.pop("resultType", None)
+    elif result_type == "input_required":
+        result["resultType"] = "input_required"
+        result.setdefault("requestState", "injected-request-state")
+    elif result_type == "unknown":
+        result["resultType"] = UNKNOWN_RESULT_TYPE
+    if result_type != "normal":
+        labels.append(f"modernResponse.resultType={result_type}")
+
+    if injection["omitServerInfo"]:
+        meta = dict(result.get("_meta") or {})
+        meta.pop(META_SERVER_INFO, None)
+        if meta:
+            result["_meta"] = meta
+        else:
+            result.pop("_meta", None)
+        labels.append("modernResponse.omitServerInfo")
+    if injection["omitCacheFields"] and ("ttlMs" in result or "cacheScope" in result):
+        result.pop("ttlMs", None)
+        result.pop("cacheScope", None)
+        labels.append("modernResponse.omitCacheFields")
+    if injection["issueSessionId"]:
+        headers["Mcp-Session-Id"] = str(uuid.uuid4())
+        labels.append("modernResponse.issueSessionId")
+    if not labels:
+        return reply
+
+    new_body = {**body, "result": result}
+    updated = dict(reply)
+    updated["body"] = new_body
+    updated["headers"] = headers
+    if reply["transport"] == "sse" and reply["events"] and reply["events"][-1] is body:
+        updated["events"] = reply["events"][:-1] + [new_body]
+    updated["injected"] = reply["injected"] + labels
+    return updated
+
+
+def handle_modern_request(
+    payload: dict[str, Any], config: dict[str, Any], headers: Any
+) -> dict[str, Any]:
+    """Dispatch a 2026-07-28 request the way the published spec describes.
+
+    Stateless: Mcp-Session-Id is neither read nor issued.
+    """
+    request_id = payload.get("id")
+    method = payload.get("method")
+    lowered = _lowered_headers(headers)
+    failure = validate_modern_request(payload, lowered)
+    if failure is not None:
+        return _reply(failure[0], failure[1])
+    if method not in MODERN_SUPPORTED_METHODS:
+        # Unknown methods and methods removed in 2026-07-28 (initialize, ping, ...).
+        return _reply(
+            404, json_rpc_error(request_id, ERR_METHOD_NOT_FOUND, f"Method not found: {method}")
+        )
+
+    if method == "server/discover":
+        return apply_modern_response_injection(modern_discover_reply(payload, config), config, method)
+
+    missing = missing_client_capabilities(
+        config["modern"]["requiredClientCapabilities"], request_meta(payload)
+    )
+    if missing:
+        return _reply(
+            400,
+            json_rpc_error(
+                request_id,
+                ERR_MISSING_CAPABILITY,
+                f"Missing required client capability: {', '.join(missing)}",
+                {"requiredCapabilities": missing},
+            ),
+            injected=["modern.requiredClientCapabilities"],
+        )
+
+    if method == "tools/list":
+        return apply_modern_response_injection(modern_tools_list_reply(payload, config), config, method)
+
+    if method == "tools/call":
+        normal = modern_tools_call_reply(payload, config, lowered)
+        reply = apply_tool_call_plan(
+            tool_call_plan(payload, config),
+            normal,
+            payload,
+            config,
+            lambda rid, result: json_rpc_result_2026(rid, result, config),
+        )
+        return apply_modern_response_injection(reply, config, method)
+
+    error = validate_subscriptions_listen(payload)
+    if error is not None:
+        return _reply(400, error)
+    return _reply(200, subscriptions_listen_result(request_id, config))
+
+
+def handle_legacy_request(
+    payload: dict[str, Any],
+    config: dict[str, Any],
+    headers: Any,
+    check_session: bool = True,
+) -> dict[str, Any]:
+    """The initialize-handshake (2025 and earlier) path."""
     request_id = payload.get("id")
     method = payload.get("method")
     is_notification = "id" not in payload
 
-    # 2026-07-28: stateless, per-request metadata. Detect via header/_meta and,
-    # for actual requests, validate the envelope before dispatching.
-    is_2026 = request_era(payload, headers) == "2026"
-
-    # 2026-only mode: a legacy (handshake) client that does not speak the 2026
-    # transport is refused with -32022 instead of being served via the old path.
-    # This is how we prove an older client actually breaks against a 2026 server.
-    if config.get("rejectLegacy") and not is_2026 and not is_notification:
-        return 400, {}, json_rpc_error(
-            request_id,
-            ERR_UNSUPPORTED_VERSION,
-            "This server only supports protocol version "
-            f"{PROTOCOL_VERSION_2026}. Legacy initialize-handshake clients are "
-            f"not accepted. Supported: {PROTOCOL_VERSION_2026}",
-        )
-
-    if is_2026 and not is_notification:
-        error = validate_2026_request(payload, headers)
-        if error is not None:
-            return 400, {}, error
-        return handle_json_rpc_2026(payload, config, request_id, method)
+    if check_session:
+        failure = legacy_session_failure(config, method, _lowered_headers(headers))
+        if failure is not None:
+            return failure
 
     if method == "initialize":
-        session_id = str(uuid.uuid4())
-        SESSIONS.add(session_id)
         params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
         requested_version = params.get("protocolVersion")
         # Fall back to the newest *legacy* version, never to 2026-07-28: reaching
@@ -1473,30 +3223,148 @@ def handle_json_rpc(
             "capabilities": capabilities,
             "serverInfo": {"name": config["mcp"]["identifier"], "version": SERVER_VERSION},
         }
-        return 200, {"Mcp-Session-Id": session_id}, json_rpc_result(request_id, result)
+        if not config["session"]["issueId"]:
+            return _reply(200, json_rpc_result(request_id, result), injected=["session.issueId=false"])
+        session_id = str(uuid.uuid4())
+        SESSIONS.add(session_id)
+        return _reply(200, json_rpc_result(request_id, result), {"Mcp-Session-Id": session_id})
 
     if method == "notifications/initialized":
-        return 202, {}, None
+        return _reply(202)
 
     if method == "ping":
-        return 202 if is_notification else 200, {}, None if is_notification else json_rpc_result(request_id, {})
+        if is_notification:
+            return _reply(202)
+        return _reply(200, json_rpc_result(request_id, {}))
 
     if method == "tools/list":
         if config["toolsList"]["mode"] == "json-rpc-error":
-            return 200, {}, json_rpc_error(request_id, -32603, "Injected tools/list failure")
+            return _reply(200, json_rpc_error(request_id, ERR_INTERNAL, "Injected tools/list failure"))
         scenario_tools = tools_for_config(config)
-        return 200, {}, json_rpc_result(
-            request_id,
-            scenario_tools or {"tools": tools(config["mcp"]["serviceName"])},
+        result = scenario_tools or {"tools": tools(config["mcp"]["serviceName"])}
+        result, error, labels = paginate_tools_result(
+            result, config, payload.get("params"), request_id
         )
+        if error is not None:
+            return _reply(200, error, injected=labels)
+        return _reply(200, json_rpc_result(request_id, result), injected=labels)
 
     if method == "tools/call":
-        result = call_tool(payload.get("params"))
-        return 200, {}, json_rpc_result(request_id, result)
+        normal = _reply(200, json_rpc_result(request_id, call_tool(payload.get("params"))))
+        return apply_tool_call_plan(
+            tool_call_plan(payload, config), normal, payload, config, json_rpc_result
+        )
 
     if is_notification:
-        return 202, {}, None
-    return 200, {}, json_rpc_error(request_id, -32601, f"Method not found: {method}")
+        return _reply(202)
+    probe_mode = config["legacyModernProbe"]["mode"]
+    if config_server_era(config) == "legacy" and probe_mode in ("invalid-params", "http-400"):
+        # Python SDK 1.x: an unknown method fails request validation. Body as
+        # observed on mcp 1.27.2 (scripts/sdk1_legacy_server.py). http-400 is the
+        # SDK 1.x transport check; a request that passes it (no version header)
+        # gets this same answer from that SDK.
+        return _reply(
+            200,
+            json_rpc_error(request_id, ERR_INVALID_PARAMS, "Invalid request parameters", ""),
+            injected=[f"legacyModernProbe.mode={probe_mode}"],
+        )
+    return _reply(200, json_rpc_error(request_id, ERR_METHOD_NOT_FOUND, f"Method not found: {method}"))
+
+
+def handle_mcp_exchange(
+    payload: Any,
+    scenario: str = "ok",
+    config: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Decide the reply for one /mcp POST body. See _reply for the shape."""
+    scenario = normalize_scenario(scenario)
+    config = normalize_config(config) if config is not None else scenario_to_config(scenario)
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+        message = "Invalid Request"
+        if isinstance(payload, list):
+            message = "Invalid Request: JSON-RPC batch requests are not supported"
+        return _reply(400, json_rpc_error(None, ERR_INVALID_REQUEST, message))
+
+    request_id = payload.get("id")
+    method = payload.get("method")
+    is_notification = "id" not in payload
+    server_era = config_server_era(config)
+    strict = config["strict2026"]
+
+    # Legacy-only mode: a server that predates 2026-07-28 does not know the 2026
+    # markers. legacyModernProbe picks how it reacts to them; by default they are
+    # ignored, every request takes the handshake path, and server/discover is
+    # just an unknown method (-32601).
+    if server_era == "legacy":
+        probe = legacy_modern_probe_reply(payload, config, headers)
+        if probe is not None:
+            return probe
+
+    # 2026-07-28: stateless, per-request metadata. Detect via header/_meta and,
+    # for actual requests, validate the envelope before dispatching.
+    is_2026 = server_era != "legacy" and request_era(payload, headers) == "2026"
+    # A request whose _meta carries the modern protocolVersion key is a modern
+    # request even when its MCP-Protocol-Version header names a legacy version
+    # (legacy clients never send that key). It must reach the modern validation,
+    # which answers the header/_meta disagreement with -32020.
+    if strict and server_era != "legacy" and META_PROTOCOL_VERSION in request_meta(payload):
+        is_2026 = True
+
+    # 2026-only mode: a legacy (handshake) client that does not speak the 2026
+    # transport is refused with -32022 instead of being served via the old path.
+    # This is how we prove an older client actually breaks against a 2026 server.
+    if config.get("rejectLegacy") and not is_2026 and not is_notification:
+        data = None
+        if strict:
+            data = {
+                "supported": list(MODERN_PROTOCOL_VERSIONS),
+                "requested": declared_legacy_version(payload, _lowered_headers(headers)),
+            }
+        return _reply(
+            400,
+            json_rpc_error(
+                request_id,
+                ERR_UNSUPPORTED_VERSION,
+                "This server only supports protocol version "
+                f"{PROTOCOL_VERSION_2026}. Legacy initialize-handshake clients are "
+                f"not accepted. Supported: {PROTOCOL_VERSION_2026}",
+                data,
+            ),
+        )
+
+    if is_2026 and not is_notification:
+        if strict:
+            return handle_modern_request(payload, config, headers)
+        # strict2026=False: the earlier lenient behaviour, plus toolCall injection.
+        error = validate_2026_request(payload, headers)
+        if error is not None:
+            return _reply(400, error, injected=["strict2026=false"])
+        status, extra_headers, body = handle_json_rpc_2026(payload, config, request_id, method)
+        reply = _reply(status, body, extra_headers, injected=["strict2026=false"])
+        if method == "tools/call":
+            reply = apply_tool_call_plan(
+                tool_call_plan(payload, config), reply, payload, config, json_rpc_result_2026
+            )
+        return reply
+
+    # A modern-marked notification lands here too; it has no session to check.
+    return handle_legacy_request(payload, config, headers, check_session=not is_2026)
+
+
+def handle_json_rpc(
+    payload: Any,
+    scenario: str = "ok",
+    config: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], dict[str, Any] | None]:
+    """(HTTP status, extra headers, JSON-RPC body) view of handle_mcp_exchange.
+
+    Replies that are not a single JSON object (SSE, plain text, dropped
+    connection) report their final JSON-RPC message, or None when there is none.
+    """
+    reply = handle_mcp_exchange(payload, scenario, config, headers)
+    return reply["status"], reply["headers"], reply["body"]
 
 
 def handle_json_rpc_2026(
@@ -1505,10 +3373,12 @@ def handle_json_rpc_2026(
     request_id: Any,
     method: Any,
 ) -> tuple[int, dict[str, str], dict[str, Any] | None]:
-    """Dispatch a validated 2026-07-28 request.
+    """Dispatch a 2026-07-28 request the earlier (lenient) way.
 
-    Stateless: no initialize handshake, no session id. Results carry the 2026
-    envelope (resultType + _meta.serverInfo) via json_rpc_result_2026.
+    Only reached with strict2026=False; the spec-conformant dispatcher is
+    handle_modern_request. Stateless: no initialize handshake, no session id.
+    Results carry the 2026 envelope (resultType + _meta.serverInfo) via
+    json_rpc_result_2026.
     """
     if method == "initialize":
         # 2026 has no handshake, but a client may still probe. Respond without a
@@ -2006,6 +3876,8 @@ _INSPECT_PAGE = """<!doctype html>
     .era-2025 { background: #eceff3; color: #3d4955; }
     .ok { background: #e1f5eb; color: #14532d; }
     .err { background: var(--danger-soft); color: var(--danger); }
+    .raw { background: #fff1d6; color: #8a4b00; }
+    .method .badge.raw { display: inline-block; margin-left: 6px; vertical-align: middle; }
     .pane { min-width: 0; }
     .pane h3 { margin: 0 0 7px; font-size: 12px; color: var(--muted); }
     pre {
@@ -2453,6 +4325,8 @@ _INSPECT_PAGE = """<!doctype html>
     }
 
     function statusText(exchange) {
+      // status 0: the server closed the connection without a response (disconnect).
+      if (!exchange.status) return "연결 종료";
       const errorCode = exchange.responseBody && exchange.responseBody.error
         ? exchange.responseBody.error.code
         : null;
@@ -2467,14 +4341,14 @@ _INSPECT_PAGE = """<!doctype html>
       logSummary.textContent = `표시 ${visible.length}건 · 버퍼 ${exchanges.length}건`;
       metaEl.textContent = `최근 /mcp 요청 ${visible.length}건`;
       listEl.innerHTML = visible.map((x) => {
-        const ok = x.status < 400;
+        const ok = x.status >= 200 && x.status < 400;
         const open = openRows.has(x.seq) ? " open" : "";
         return `
         <article class="row${open}" data-seq="${x.seq}">
           <div class="row-head">
             <span class="time">${esc(x.time)}</span>
-            <span class="badge ${x.era === "2026" ? "era-2026" : "era-2025"}">${esc(x.era)}</span>
-            <span class="method">${esc(x.method || x.httpMethod)}</span>
+            <span class="badge ${x.era === "2026" ? "era-2026" : "era-2025"}"${x.serverEra && x.serverEra !== "both" ? ' title="serverEra=' + esc(x.serverEra) + ' 모드로 처리됨"' : ""}>${esc(x.era)}${x.serverEra && x.serverEra !== "both" ? " → " + esc(x.serverEra) : ""}</span>
+            <span class="method">${esc(x.method || x.httpMethod)}${x.rawResponse ? ' <span class="badge raw" title="개발자가 지정한 고정 응답(raw response)">RAW</span>' : ""}${(x.injected || []).length ? ' <span class="badge raw" title="' + esc(x.injected.join(", ")) + '">주입 ' + x.injected.length + '</span>' : ""}</span>
             <span class="badge ${ok ? "ok" : "err"}">${esc(statusText(x))}</span>
             <button class="small detail-toggle" type="button">${open ? "닫기" : "상세"}</button>
           </div>
@@ -2484,8 +4358,8 @@ _INSPECT_PAGE = """<!doctype html>
               <pre>${headerLines(x.requestHeaders)}\\n\\n${pretty(x.requestBody)}</pre>
             </div>
             <div class="pane">
-              <h3>응답</h3>
-              <pre>${pretty(x.responseBody)}</pre>
+              <h3>응답${x.rawResponse ? " (RAW)" : ""}${(x.injected || []).length ? " · 주입: " + esc(x.injected.join(", ")) : ""}</h3>
+              <pre>${x.responseHeaders && Object.keys(x.responseHeaders).length ? headerLines(x.responseHeaders) + "\\n\\n" : ""}${pretty(x.responseBody)}</pre>
             </div>
           </div>
         </article>`;
@@ -2555,6 +4429,215 @@ _INSPECT_PAGE = """<!doctype html>
   </script>
 </body>
 </html>"""
+
+
+def _advanced_field(
+    path: str,
+    kind: str,
+    label: str,
+    hint: str = "",
+    options: Any = None,
+) -> dict[str, Any]:
+    return {"path": path, "kind": kind, "label": label, "hint": hint, "options": options}
+
+
+def advanced_field_groups() -> tuple[tuple[str, str, list[dict[str, Any]]], ...]:
+    """Controls of the /scenario "프로토콜 주입 설정" card, grouped by era.
+
+    Each field is bound to a config path; the page reads and writes them
+    generically (data-config-path / data-config-kind).
+    """
+    return (
+        (
+            "2026-07-28 전용",
+            "모던(stateless) 경로에만 적용",
+            [
+                _advanced_field(
+                    "strict2026", "bool", "스펙 준수 모드", "끄면 이전의 느슨한 2026 동작"
+                ),
+                _advanced_field(
+                    "discover.mode", "select", "server/discover 응답", options=DISCOVER_MODES
+                ),
+                _advanced_field(
+                    "discover.errorCode", "int", "discover JSON-RPC 에러 코드", "mode=json-rpc-error"
+                ),
+                _advanced_field(
+                    "discover.httpStatus", "int", "discover HTTP 5xx 코드", "mode=http-5xx, 500~599"
+                ),
+                _advanced_field("discover.delaySeconds", "float", "discover 지연(초)", "0~120"),
+                _advanced_field("discover.cacheTtlMs", "int", "discover ttlMs"),
+                _advanced_field(
+                    "discover.cacheScope",
+                    "select",
+                    "discover cacheScope",
+                    options={"private": "private", "public": "public"},
+                ),
+                _advanced_field(
+                    "modernResponse.resultType",
+                    "select",
+                    "resultType 위반 주입",
+                    options=MODERN_RESULT_TYPE_MODES,
+                ),
+                _advanced_field(
+                    "modernResponse.methods",
+                    "list",
+                    "위반 주입 대상 메서드",
+                    "쉼표 구분, 비우면 전체 (" + ", ".join(MODERN_RESULT_METHODS) + ")",
+                ),
+                _advanced_field("modernResponse.omitServerInfo", "bool", "_meta serverInfo 누락"),
+                _advanced_field("modernResponse.omitCacheFields", "bool", "ttlMs/cacheScope 누락"),
+                _advanced_field(
+                    "modernResponse.issueSessionId", "bool", "2026 응답에 Mcp-Session-Id 발급"
+                ),
+                _advanced_field(
+                    "modern.testTools",
+                    "bool",
+                    "테스트 툴 노출",
+                    f"{HEADER_PARAMS_TOOL}, {MRTR_TOOL}",
+                ),
+                _advanced_field(
+                    "modern.requiredClientCapabilities",
+                    "list",
+                    "필수 클라이언트 capability (-32021)",
+                    "쉼표 구분: " + ", ".join(CLIENT_CAPABILITY_NAMES),
+                ),
+                _advanced_field(
+                    "modern.invalidParamsHttpStatus",
+                    "select-int",
+                    "-32602 HTTP 상태",
+                    "알 수 없는 툴, 잘못된 커서 (스펙 미규정)",
+                    options={"200": "200", "400": "400"},
+                ),
+                _advanced_field(
+                    "modern.rejectUnexpectedParamHeader",
+                    "bool",
+                    "바디에 값이 없는 Mcp-Param-* 거부",
+                    "스펙 미규정. 끄면 헤더를 무시",
+                ),
+            ],
+        ),
+        (
+            "레거시 전용",
+            "initialize 핸드셰이크 경로 / serverEra=legacy",
+            [
+                _advanced_field(
+                    "legacyModernProbe.mode",
+                    "select",
+                    "legacy 서버가 2026 요청에 주는 응답",
+                    "serverEra=legacy일 때만",
+                    options=LEGACY_MODERN_PROBE_MODES,
+                ),
+                _advanced_field(
+                    "legacyModernProbe.delaySeconds", "float", "timeout 모드 무응답 시간(초)", "0~120"
+                ),
+                _advanced_field(
+                    "initialize.protocolVersion",
+                    "select",
+                    "initialize 응답 버전",
+                    "최소 지원 버전 시나리오(2024-11-05)를 켜면 그 값이 우선",
+                    options={
+                        version: label
+                        for version, label in PROTOCOL_VERSION_CHOICES
+                        if version != "2024-11-05"
+                    },
+                ),
+                _advanced_field("session.validate", "bool", "세션 검증", "누락 400, 모르는 세션 404, DELETE 종료"),
+                _advanced_field("session.issueId", "bool", "세션 ID 발급"),
+            ],
+        ),
+        (
+            "공용",
+            "두 era 모두 적용",
+            [
+                _advanced_field("toolCall.mode", "select", "tools/call 응답", options=TOOL_CALL_MODES),
+                _advanced_field(
+                    "toolCall.errorCode", "int", "tools/call JSON-RPC 에러 코드", "mode=json-rpc-error"
+                ),
+                _advanced_field(
+                    "toolCall.httpStatus", "int", "tools/call HTTP 상태", "mode=http-status, 400~599"
+                ),
+                _advanced_field("toolCall.delaySeconds", "float", "tools/call 지연(초)", "0~120"),
+                _advanced_field(
+                    "toolCall.sseNotificationCount", "int", "SSE 알림 개수", "mode=sse, 0~20"
+                ),
+                _advanced_field(
+                    "toolCall.targetTools", "list", "대상 툴", "쉼표 구분, 비우면 전체"
+                ),
+                _advanced_field("toolsList.pageSize", "int", "tools/list 페이지 크기", "0=페이지네이션 없음"),
+                _advanced_field(
+                    "toolsList.failAtPage", "int", "실패시킬 페이지 번호", "0=끔, pageSize>0일 때만"
+                ),
+                _advanced_field(
+                    "allowedOrigins", "list", "Origin 허용 목록", "쉼표 구분, 비우면 모두 허용"
+                ),
+                _advanced_field(
+                    "auth.enforceScope", "bool", "토큰 scope 검사", "mcp 스코프 없으면 403 insufficient_scope"
+                ),
+            ],
+        ),
+    )
+
+
+def render_advanced_controls() -> str:
+    sections: list[str] = []
+    for group_label, selection_rule, fields in advanced_field_groups():
+        toggles: list[str] = []
+        inputs: list[str] = []
+        for field in fields:
+            path = escape(field["path"])
+            kind = field["kind"]
+            hint = f'<span class="field-hint">{escape(field["hint"])}</span>' if field["hint"] else ""
+            if kind == "bool":
+                toggles.append(
+                    f"""
+        <label class="check-row" title="{escape(field["hint"])}">
+          <input type="checkbox" data-config-path="{path}" data-config-kind="bool">
+          <span>{escape(field["label"])}</span>
+          <code>{path}</code>
+        </label>
+        """
+                )
+                continue
+            if kind in {"select", "select-int"}:
+                data_kind = "int" if kind == "select-int" else "string"
+                options = "".join(
+                    f'<option value="{escape(str(value))}">{escape(str(value))} · {escape(str(text))}</option>'
+                    if str(value) != str(text)
+                    else f'<option value="{escape(str(value))}">{escape(str(value))}</option>'
+                    for value, text in field["options"].items()
+                )
+                control = (
+                    f'<select data-config-path="{path}" data-config-kind="{data_kind}">{options}</select>'
+                )
+            else:
+                input_type = "text" if kind == "list" else "number"
+                step = ' step="any"' if kind == "float" else ""
+                control = (
+                    f'<input type="{input_type}"{step} autocomplete="off" '
+                    f'data-config-path="{path}" data-config-kind="{kind}">'
+                )
+            inputs.append(
+                f"""
+        <label class="field">
+          <span class="field-title">{escape(field["label"])} <code>{path}</code>{hint}</span>
+          {control}
+        </label>
+        """
+            )
+        sections.append(
+            f"""
+        <section class="tool-error-section">
+          <h3>{escape(group_label)} <span>{escape(selection_rule)}</span></h3>
+          <div class="tool-error-list">
+            {"".join(toggles)}
+          </div>
+          <div class="field-grid">
+            {"".join(inputs)}
+          </div>
+        </section>
+        """
+        )
+    return "\n".join(sections)
 
 
 def render_scenario_page(message: str | None = None, error: str | None = None) -> str:
@@ -2668,6 +4751,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       """
         )
     policy_reference = "\n".join(policy_reference_sections)
+    advanced_controls = render_advanced_controls()
     notice = ""
     if message:
         notice = f'<div class="notice success">{escape(message)}</div>'
@@ -3851,6 +5935,23 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
               {tool_error_controls}
             </div>
           </section>
+          <section class="control-card full server-card" id="advancedCard">
+            <div class="card-title">
+              <h2>프로토콜 주입 설정</h2>
+              <span class="step-badge">3</span>
+            </div>
+            <p class="section-hint">
+              2026-07-28 스펙 준수 여부, server/discover·tools/call 에러 주입, 레거시 세션·버전·페이지네이션을 설정합니다. 전체 옵션은 docs/CONFIG_REFERENCE.md를 참고하세요.
+            </p>
+            <div class="check-grid" id="advancedGrid">
+              {advanced_controls}
+            </div>
+            <p class="section-hint">
+              <button id="expireSessions" class="secondary" type="button">발급된 세션 전부 만료</button>
+              <span id="expireSessionsResult"></span>
+              session.validate가 켜진 URL에서 다음 요청이 404가 됩니다(재연결 테스트).
+            </p>
+          </section>
           <details class="control-card full policy-details">
             <summary>
               <h2>시나리오별 설명</h2>
@@ -3926,6 +6027,24 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
                 <span class="hint-label">동작</span>
                 <code>401 + WWW-Authenticate: Bearer resource_metadata="…"</code>
                 <p class="hint-desc">자체 미니 AS(/authorize·/token·/register)가 토큰을 발급합니다. oauth는 모든 요청, mixed-oauth는 보호 툴 tools/call만 401을 반환합니다.</p>
+              </div>
+            </div>
+            <div class="sidebar-custom-header-row" id="serverEraRow">
+              <div class="sidebar-custom-header-label">
+                <span class="field-title">
+                  서버 세대 (serverEra)
+                  <span class="field-hint">both=2026·레거시 모두 처리, legacy=2026을 모르는 레거시 서버처럼 동작, modern=2026만 지원(레거시 요청 -32022).</span>
+                </span>
+                <select id="serverEra">
+                  <option value="both">both · 둘 다</option>
+                  <option value="legacy">legacy · 레거시 전용</option>
+                  <option value="modern">modern · 2026 전용</option>
+                </select>
+              </div>
+              <div id="serverEraHint" class="custom-header-hint" hidden>
+                <span class="hint-label">동작</span>
+                <code id="serverEraHintCode"></code>
+                <p class="hint-desc" id="serverEraHintDesc"></p>
               </div>
             </div>
             <div class="sidebar-custom-header-row era-2026-only" id="rejectLegacyRow">
@@ -4166,7 +6285,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       const scenarios = [];
       if (config.server.httpStatus === 401) scenarios.push("auth-401");
       if (config.server.httpStatus === 403) scenarios.push("auth-403");
-      if (config.initialize.protocolVersion !== "2025-03-26") {{
+      if (config.initialize.protocolVersion === "2024-11-05") {{
         scenarios.push("unsupported-min-version");
       }}
       if (config.server.delayEnabled) scenarios.push("delayed-response");
@@ -4183,7 +6302,60 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       return scenarios;
     }}
 
+    function getPath(source, path) {{
+      return path.split(".").reduce(
+        (current, key) => (current === undefined || current === null ? undefined : current[key]),
+        source
+      );
+    }}
+
+    function setPath(target, path, value) {{
+      const keys = path.split(".");
+      let current = target;
+      keys.slice(0, -1).forEach((key) => {{
+        if (typeof current[key] !== "object" || current[key] === null) current[key] = {{}};
+        current = current[key];
+      }});
+      current[keys[keys.length - 1]] = value;
+    }}
+
+    function advancedInputs() {{
+      return Array.from(document.querySelectorAll("[data-config-path]"));
+    }}
+
+    function readAdvanced(input) {{
+      const kind = input.dataset.configKind;
+      const fallback = getPath(defaultConfig, input.dataset.configPath);
+      if (kind === "bool") return input.checked;
+      if (kind === "int") {{
+        const parsed = parseInt(input.value, 10);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      }}
+      if (kind === "float") {{
+        const parsed = parseFloat(input.value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      }}
+      if (kind === "list") {{
+        return input.value.split(",").map((item) => item.trim()).filter(Boolean);
+      }}
+      return input.value || fallback;
+    }}
+
+    function writeAdvanced(input, config) {{
+      let value = getPath(config, input.dataset.configPath);
+      if (value === undefined) value = getPath(defaultConfig, input.dataset.configPath);
+      const kind = input.dataset.configKind;
+      if (kind === "bool") {{
+        input.checked = !!value;
+      }} else if (kind === "list") {{
+        input.value = (value || []).join(", ");
+      }} else {{
+        input.value = String(value);
+      }}
+    }}
+
     function setControls(config) {{
+      advancedInputs().forEach((input) => writeAdvanced(input, config));
       mcpIdentifier.value = config.mcp.identifier;
       mcpServiceName.value = config.mcp.serviceName;
       const serverErrors = serverErrorsFromConfig(config);
@@ -4202,6 +6374,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       if (authModeEl) {{
         authModeEl.value = (config.auth && config.auth.mode) || "off";
         syncAuthModeHint();
+      }}
+      const serverEraEl = document.getElementById("serverEra");
+      if (serverEraEl) {{
+        serverEraEl.value = config.serverEra || (config.rejectLegacy ? "modern" : "both");
+        syncServerEraHint();
       }}
       const rejectLegacyEl = document.getElementById("rejectLegacyEnabled");
       if (rejectLegacyEl) {{
@@ -4223,9 +6400,10 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       const duplicateToolName =
         ["normal", "too-many"].includes(mode) && serverErrors.includes("duplicate-tool-name");
       const toolErrors = mode === "normal" ? selectedToolErrors() : [];
-      return {{
+      const config = {{
         protocolEra: currentEra,
         rejectLegacy: currentEra === "2026" && document.getElementById("rejectLegacyEnabled").checked,
+        serverEra: document.getElementById("serverEra").value,
         mcp: {{
           identifier: mcpIdentifier.value.trim() || defaultConfig.mcp.identifier,
           serviceName: mcpServiceName.value.trim() || defaultConfig.mcp.serviceName
@@ -4265,6 +6443,14 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         }},
         toolErrors
       }};
+      advancedInputs().forEach((input) => {{
+        setPath(config, input.dataset.configPath, readAdvanced(input));
+      }});
+      // The "최소 지원 버전" scenario checkbox outranks the version select.
+      if (serverErrors.includes("unsupported-min-version")) {{
+        config.initialize.protocolVersion = "2024-11-05";
+      }}
+      return config;
     }}
 
     function syncCustomHeaderHint() {{
@@ -4292,7 +6478,43 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       document.getElementById("rejectLegacyHint").hidden = !enabled;
     }}
 
+    const serverEraHints = {{
+      legacy: [
+        "server/discover → -32601 Method not found",
+        "Mcp-Method·_meta 등 2026 표식을 무시하고 모든 요청을 레거시(initialize 핸드셰이크) 경로로 처리합니다. modern client → legacy server 조합을 확인할 때 사용합니다."
+      ],
+      modern: [
+        "-32022 UnsupportedProtocolVersion",
+        "2026 전송 표식이 없는 레거시 요청을 거부합니다. '지원 프로토콜 버전 2026-07-28로 고정'(rejectLegacy)과 같은 동작입니다."
+      ]
+    }};
+
+    function syncServerEraHint() {{
+      const value = document.getElementById("serverEra").value;
+      const hint = serverEraHints[value];
+      document.getElementById("serverEraHint").hidden = !hint;
+      document.getElementById("serverEraHintCode").textContent = hint ? hint[0] : "";
+      document.getElementById("serverEraHintDesc").textContent = hint ? hint[1] : "";
+    }}
+
+    // serverEra is the source of truth; the rejectLegacy toggle is its alias for
+    // "modern", so the two controls are kept in step.
+    document.getElementById("serverEra").addEventListener("change", () => {{
+      document.getElementById("rejectLegacyEnabled").checked =
+        currentEra === "2026" && document.getElementById("serverEra").value === "modern";
+      syncRejectLegacyHint();
+      syncServerEraHint();
+      handleControlChange();
+    }});
+
     document.getElementById("rejectLegacyEnabled").addEventListener("change", () => {{
+      const serverEraSelect = document.getElementById("serverEra");
+      if (document.getElementById("rejectLegacyEnabled").checked) {{
+        serverEraSelect.value = "modern";
+      }} else if (serverEraSelect.value === "modern") {{
+        serverEraSelect.value = "both";
+      }}
+      syncServerEraHint();
       syncRejectLegacyHint();
       handleControlChange();
     }});
@@ -4381,6 +6603,15 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       for (const error of config.toolErrors) {{
         parts.push(titleForToolError(error));
       }}
+      advancedInputs().forEach((input) => {{
+        const path = input.dataset.configPath;
+        if (path === "initialize.protocolVersion") return;
+        const value = getPath(config, path);
+        const fallback = getPath(defaultConfig, path);
+        if (value !== undefined && JSON.stringify(value) !== JSON.stringify(fallback)) {{
+          parts.push(`${{path}}=${{Array.isArray(value) ? value.join("|") : value}}`);
+        }}
+      }});
       return parts.length ? parts.join(" + ") : "정상 응답";
     }}
 
@@ -4601,6 +6832,21 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
       input.addEventListener("input", handleControlChange);
     }});
 
+    document.getElementById("expireSessions").addEventListener("click", async () => {{
+      const resultEl = document.getElementById("expireSessionsResult");
+      try {{
+        const response = await fetch("/scenario", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ action: "expireSessions" }})
+        }});
+        const body = await response.json();
+        resultEl.textContent = body.ok ? `만료 ${{body.expired}}건.` : `실패: ${{body.error}}`;
+      }} catch (error) {{
+        resultEl.textContent = `실패: ${{error}}`;
+      }}
+    }});
+
     copyMcpUrl.addEventListener("click", async () => {{
       const text = mcpUrl.textContent.trim();
       try {{
@@ -4627,6 +6873,22 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
 </html>"""
 
 
+# Methods each fixed route accepts, for the Allow header of a 405. /mcp depends on
+# the config (Handler.mcp_allowed_methods).
+ROUTE_METHODS = {
+    "/": "GET, OPTIONS",
+    "/scenario": "GET, POST, OPTIONS",
+    "/healthz": "GET, OPTIONS",
+    "/inspect": "GET, OPTIONS",
+    "/inspect/log": "GET, OPTIONS",
+    "/.well-known/oauth-protected-resource": "GET, OPTIONS",
+    "/.well-known/oauth-authorization-server": "GET, OPTIONS",
+    "/authorize": "GET, POST, OPTIONS",
+    "/register": "POST, OPTIONS",
+    "/token": "POST, OPTIONS",
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "UnitExpertMCP/1.0"
@@ -4635,6 +6897,47 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_cors_headers()
         self.end_headers()
+
+    def __getattr__(self, name: str) -> Any:
+        # BaseHTTPRequestHandler answers a method without a do_<METHOD> handler
+        # (PUT, PATCH, HEAD, ...) with 501. Those are known methods this resource
+        # does not allow, so answer 405 + Allow instead (RFC 9110 15.5.6).
+        if name.startswith("do_"):
+            return self.handle_unsupported_method
+        raise AttributeError(name)
+
+    def handle_unsupported_method(self) -> None:
+        path = urlparse(self.path).path
+        if path != "/mcp":
+            allow = ROUTE_METHODS.get(path)
+            if allow is None:
+                self.send_text(404, "Not found")
+            else:
+                self.send_405(allow)
+            self.close_connection = True
+            return
+        try:
+            config = self.request_config()
+        except ValueError:
+            config = None
+        self.send_405(self.mcp_allowed_methods(config))
+        # The request body (if any) was not read, so the connection cannot be reused.
+        self.close_connection = True
+
+    def mcp_allowed_methods(self, config: dict[str, Any] | None) -> str:
+        """Allow header value for /mcp under the given config."""
+        era = config_server_era(config)
+        methods = ["POST", "OPTIONS"]
+        if not (era == "modern" and (config is None or config["strict2026"])):
+            methods.insert(0, "GET")
+        if (
+            config is not None
+            and era != "modern"
+            and config["session"]["validate"]
+            and config["session"]["issueId"]
+        ):
+            methods.append("DELETE")
+        return ", ".join(methods)
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -4672,7 +6975,21 @@ class Handler(BaseHTTPRequestHandler):
 
         # 2026-07-28 removed the GET stream endpoint (stateless). A 2026 client
         # (detected via MCP-Protocol-Version) gets 405; legacy keeps the stream.
-        if request_era(None, self.headers) == "2026":
+        # A legacy-only server (serverEra="legacy") does not know that rule, so
+        # the request falls through to the legacy GET handling below.
+        # A modern-only server (serverEra="modern", strict2026) answers 405 to
+        # every GET, markers or not (spec: Backward Compatibility, SHOULD).
+        try:
+            early_config = self.request_config()
+        except ValueError:
+            early_config = None
+        if early_config is not None and self.reject_origin(early_config, "GET", path):
+            return
+        early_era = config_server_era(early_config)
+        if early_era != "legacy" and (
+            request_era(None, self.headers) == "2026"
+            or (early_era == "modern" and early_config is not None and early_config["strict2026"])
+        ):
             self.send_405()
             return
 
@@ -4692,6 +7009,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         session_id = self.headers.get("mcp-session-id")
+        if config["session"]["validate"] and config["session"]["issueId"]:
+            failure = session_error(session_id)
+            if failure is not None:
+                record_exchange(
+                    "GET",
+                    path,
+                    self.headers,
+                    None,
+                    failure[0],
+                    failure[1],
+                    server_era=config_server_era(config),
+                    injected=["session.validate"],
+                )
+                self.send_json(failure[0], failure[1])
+                return
         if not session_id:
             self.send_text(400, "Session ID required in mcp-session-id header")
             return
@@ -4705,11 +7037,55 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         # 2026-07-28 is stateless: there is no session to terminate, so DELETE
         # /mcp is not allowed. Legacy also has no DELETE handling here.
+        # With session.validate a legacy client may end its session with DELETE.
         path = urlparse(self.path).path
-        if path == "/mcp":
+        if path != "/mcp":
+            self.send_text(404, "Not found")
+            return
+        try:
+            config = self.request_config()
+        except ValueError:
             self.send_405()
             return
-        self.send_text(404, "Not found")
+        if self.reject_origin(config, "DELETE", path):
+            return
+        server_era = config_server_era(config)
+        session = config["session"]
+        is_modern_request = server_era != "legacy" and request_era(None, self.headers) == "2026"
+        if (
+            server_era == "modern"
+            or is_modern_request
+            or not session["validate"]
+            or not session["issueId"]
+        ):
+            self.send_405()
+            return
+        if self.handle_pre_json_rpc_config(config):
+            return
+        if self.enforce_auth(config, None, None):
+            return
+        session_id = self.headers.get("mcp-session-id")
+        failure = session_error(session_id)
+        status = failure[0] if failure is not None else 200
+        if failure is None and session_id:
+            terminate_session(session_id)
+        record_exchange(
+            "DELETE",
+            path,
+            self.headers,
+            None,
+            status,
+            failure[1] if failure is not None else None,
+            server_era=server_era,
+            injected=["session.validate"],
+        )
+        if failure is not None:
+            self.send_json(status, failure[1])
+            return
+        self.send_response(status)
+        self.send_cors_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
@@ -4736,20 +7112,75 @@ class Handler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(content_length)
 
+        # ValueError, not just JSONDecodeError: a body that is not UTF-8 raises
+        # UnicodeDecodeError and an oversized integer literal a bare ValueError;
+        # deeply nested input raises RecursionError.
         try:
             payload = json.loads(raw_body)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             error = json_rpc_error(None, -32700, "Parse error")
             record_exchange("POST", path, self.headers, raw_body.decode("utf-8", "replace"), 400, error)
             self.send_json(400, error)
             return
 
+        # Developer-authored raw responses win over every other check (Accept,
+        # delay, customHeader, httpStatus, auth, rejectLegacy, 2026 validation).
+        # An invalid config falls through so the regular path reports the 400.
+        try:
+            early_config = self.request_config()
+        except ValueError:
+            early_config = None
+        if early_config is not None:
+            raw_rule = match_raw_response(early_config, payload)
+            if raw_rule is not None:
+                body_text = render_raw_body(raw_rule["body"], payload.get("id"))
+                _, raw_headers = build_raw_response(raw_rule, body_text)
+                record_exchange(
+                    "POST",
+                    path,
+                    self.headers,
+                    payload,
+                    raw_rule["status"],
+                    body_text,
+                    raw_response=True,
+                    response_headers=raw_headers,
+                )
+                self.send_raw_response(raw_rule, body_text)
+                return
+
+        # A JSON array (batch) or scalar is not a JSON-RPC request this server
+        # accepts; answer with a JSON-RPC error instead of dying mid-request.
+        if not isinstance(payload, dict):
+            message = "Invalid Request"
+            if isinstance(payload, list):
+                message = "Invalid Request: JSON-RPC batch requests are not supported"
+            error = json_rpc_error(None, ERR_INVALID_REQUEST, message)
+            record_exchange("POST", path, self.headers, payload, 400, error)
+            self.send_json(400, error)
+            return
+
+        if early_config is not None and self.reject_origin(early_config, "POST", path, payload):
+            return
+
+        # serverEra="legacy" + a transport-level legacyModernProbe mode: the mode
+        # decides the answer to a modern request, so the legacy Accept rule below
+        # is not consulted for it.
+        probe_reply = None
+        if early_config is not None:
+            probe_reply = legacy_modern_probe_reply(payload, early_config, self.exchange_headers())
+
         # 2026-07-28 is stateless and single-shot; a client may accept only
         # application/json. Legacy (2025) still requires both media types.
         accept = self.headers.get("Accept", "")
         era = request_era(payload, self.headers)
-        rpc_method = payload.get("method") if isinstance(payload, dict) else None
-        if era == "2026":
+        # serverEra="legacy": 2026 markers are ignored, so the legacy Accept rule
+        # applies and the 2026-only subscriptions/listen branch stays off.
+        if config_server_era(early_config) == "legacy":
+            era = "2025"
+        rpc_method = payload.get("method")
+        if probe_reply is not None:
+            pass
+        elif era == "2026":
             if rpc_method == SUBSCRIPTIONS_LISTEN_METHOD:
                 if "text/event-stream" not in accept and "*/*" not in accept:
                     record_exchange(
@@ -4778,30 +7209,109 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.handle_pre_json_rpc_config(config, payload.get("method")):
             return
-        if self.enforce_auth(config, payload.get("method"), payload):
-            record_exchange("POST", path, self.headers, payload, 401, {"error": "invalid_token"})
+        auth_status = self.enforce_auth(config, payload.get("method"), payload)
+        if auth_status:
+            record_exchange(
+                "POST",
+                path,
+                self.headers,
+                payload,
+                auth_status,
+                {"error": "invalid_token" if auth_status == 401 else "insufficient_scope"},
+            )
+            return
+
+        if probe_reply is not None:
+            self.send_reply(path, payload, probe_reply, config)
             return
 
         if era == "2026" and rpc_method == SUBSCRIPTIONS_LISTEN_METHOD:
-            error = validate_2026_request(payload, dict(self.headers))
-            if error is None:
+            failure = modern_envelope_failure(payload, self.exchange_headers(), config)
+            if failure is None:
                 error = validate_subscriptions_listen(payload)
-            if error is not None:
-                record_exchange("POST", path, self.headers, payload, 400, error)
-                self.send_json(400, error)
+                failure = (400, error) if error is not None else None
+            if failure is not None:
+                record_exchange("POST", path, self.headers, payload, failure[0], failure[1])
+                self.send_json(failure[0], failure[1])
                 return
             messages = [
                 subscriptions_acknowledged_notification(payload),
-                subscriptions_listen_result(payload.get("id")),
+                subscriptions_listen_result(payload.get("id"), config),
             ]
             record_exchange("POST", path, self.headers, payload, 200, {"events": messages})
             self.send_sse_json_rpc(200, messages)
             return
 
-        status, extra_headers, response = handle_json_rpc(
-            payload, config=config, headers=dict(self.headers)
+        reply = handle_mcp_exchange(payload, config=config, headers=self.exchange_headers())
+        self.send_reply(path, payload, reply, config)
+
+    def exchange_headers(self) -> RequestHeaders:
+        """Request headers as a dict (first copy wins) plus the repeated names."""
+        headers = RequestHeaders(self.headers)
+        seen: set[str] = set()
+        duplicated: set[str] = set()
+        for name in self.headers.keys():
+            key = name.lower()
+            if key in seen:
+                duplicated.add(key)
+            seen.add(key)
+        headers.duplicated = frozenset(duplicated)
+        return headers
+
+    def send_reply(
+        self,
+        path: str,
+        payload: Any,
+        reply: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        """Write a handle_mcp_exchange reply (see _reply) and log it for /inspect."""
+        if reply["delay"] > 0:
+            time.sleep(reply["delay"])
+        transport = reply["transport"]
+        status = reply["status"]
+        extra_headers = reply["headers"]
+        response: Any = reply["body"]
+        if transport == "sse":
+            response = {"events": reply["events"]}
+        elif transport == "text":
+            response = {"text": reply["text"]} if reply["text"] else None
+        elif transport == "disconnect":
+            response = {"disconnect": True}
+        elif transport == "auth-challenge":
+            response = {"error": "invalid_token"}
+        record_exchange(
+            "POST",
+            path,
+            self.headers,
+            payload,
+            status,
+            response,
+            response_headers=extra_headers if reply["injected"] else None,
+            server_era=config_server_era(config),
+            injected=reply["injected"],
         )
-        record_exchange("POST", path, self.headers, payload, status, response)
+        if transport == "disconnect":
+            self.drop_connection()
+            return
+        if transport == "auth-challenge":
+            self.send_auth_challenge(include_scope=True)
+            return
+        if transport == "sse":
+            self.send_sse_json_rpc(status, reply["events"], extra_headers)
+            return
+        if transport == "text":
+            body = reply["text"].encode("utf-8")
+            self.send_response(status)
+            self.send_cors_headers()
+            if body or reply["contentType"] != "text/plain;charset=UTF-8":
+                self.send_header("Content-Type", reply["contentType"])
+            self.send_header("Content-Length", str(len(body)))
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if response is None:
             self.send_response(status)
             self.send_cors_headers()
@@ -4813,6 +7323,43 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_json(status, response, extra_headers)
 
+    def drop_connection(self) -> None:
+        """Close the socket without writing a response."""
+        self.close_connection = True
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def reject_origin(
+        self,
+        config: dict[str, Any],
+        http_method: str,
+        path: str,
+        payload: Any = None,
+    ) -> bool:
+        """403 when allowedOrigins is set and the Origin header is not listed.
+
+        An empty allow-list (the default) accepts every Origin.
+        """
+        allowed = config.get("allowedOrigins") or []
+        origin = self.headers.get("Origin")
+        if not allowed or origin is None or origin in allowed:
+            return False
+        # Spec: the 403 body MAY be a JSON-RPC error response that has no id.
+        error = {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": ERR_INVALID_REQUEST,
+                "message": f"Forbidden: Origin '{origin}' is not allowed",
+            },
+        }
+        record_exchange(
+            http_method, path, self.headers, payload, 403, error, injected=["allowedOrigins"]
+        )
+        self.send_json(403, error)
+        return True
+
     def handle_scenario_update(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(content_length)
@@ -4821,6 +7368,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if "application/json" in content_type:
                 payload = json.loads(raw_body or b"{}")
+                if isinstance(payload, dict) and "action" in payload:
+                    # Actions change runtime state, not the active config.
+                    if payload["action"] != "expireSessions":
+                        raise ValueError(f"unknown action '{payload['action']}'")
+                    self.send_json(
+                        200, {"ok": True, "action": "expireSessions", "expired": expire_sessions()}
+                    )
+                    return
                 if isinstance(payload, dict) and "config" in payload:
                     config = set_active_config(payload["config"])
                     scenario = "custom"
@@ -4833,7 +7388,7 @@ class Handler(BaseHTTPRequestHandler):
                 raw_scenario = form.get("scenario", ["ok"])[0]
                 scenario = set_active_scenario(raw_scenario)
                 config = get_active_config()
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        except (ValueError, RecursionError) as error:
             if "application/json" in content_type:
                 self.send_json(400, {"ok": False, "error": str(error)})
                 return
@@ -4872,6 +7427,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_cors_headers()
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
+        # Spec SHOULD: keep reverse proxies from buffering the event stream.
+        self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "close")
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
@@ -4882,16 +7439,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = True
 
-    def send_405(self) -> None:
-        # 2026-07-28 stateless transport: only POST /mcp is allowed.
+    def send_raw_response(self, rule: dict[str, Any], body_text: str) -> None:
+        """Send a developer-authored response verbatim (see build_raw_response)."""
+        body, headers = build_raw_response(rule, body_text)
+        self.send_response(rule["status"])
+        # A user header replaces the default CORS header of the same name.
+        self.send_cors_headers(skip={name.lower() for name in headers})
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+        self.wfile.flush()
+        self.close_connection = True
+
+    def send_405(self, allow: str = "POST, OPTIONS") -> None:
+        # Default Allow: the 2026-07-28 stateless transport, where only POST /mcp
+        # is allowed.
         body = b"Method Not Allowed"
         self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
         self.send_cors_headers()
-        self.send_header("Allow", "POST, OPTIONS")
+        self.send_header("Allow", allow)
         self.send_header("Content-Type", "text/plain;charset=UTF-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def send_text(self, status: int, text: str) -> None:
         body = text.encode("utf-8")
@@ -4912,19 +7485,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_cors_headers(self) -> None:
+    def send_cors_headers(self, skip: set[str] | None = None) -> None:
+        """Default CORS headers. ``skip`` holds lowercase names the caller sends itself."""
         origin = self.headers.get("Origin") or "*"
         requested_headers = self.headers.get("Access-Control-Request-Headers")
-        self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Credentials", "true")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE")
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            requested_headers
-            or "authorization,content-type,accept,mcp-protocol-version,mcp-session-id,x-mcp-test-scenario,*",
+        defaults = (
+            ("Access-Control-Allow-Origin", origin),
+            ("Access-Control-Allow-Credentials", "true"),
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE"),
+            (
+                "Access-Control-Allow-Headers",
+                requested_headers
+                or "authorization,content-type,accept,mcp-protocol-version,mcp-session-id,x-mcp-test-scenario,*",
+            ),
+            ("Access-Control-Expose-Headers", "Mcp-Session-Id,mcp-session-id,*"),
+            ("Vary", "Origin"),
         )
-        self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id,mcp-session-id,*")
-        self.send_header("Vary", "Origin")
+        for name, value in defaults:
+            if skip and name.lower() in skip:
+                continue
+            self.send_header(name, value)
 
     def request_scenario(self) -> str:
         return resolve_scenario(self.headers.get(TEST_SCENARIO_HEADER))
@@ -4991,8 +7571,10 @@ class Handler(BaseHTTPRequestHandler):
         config: dict[str, Any],
         method: str | None,
         payload: Any,
-    ) -> bool:
-        """Send a 401 challenge and return True when the request lacks required auth.
+    ) -> int:
+        """Send a 401/403 challenge when the request lacks required auth.
+
+        Returns the HTTP status that was sent, or 0 when the request may proceed.
 
         off         -> never gates. oauth -> every /mcp request needs a token.
         mixed-oauth -> only tools/call for a protected tool needs a token, so
@@ -5001,7 +7583,7 @@ class Handler(BaseHTTPRequestHandler):
         auth = config.get("auth", {})
         mode = auth.get("mode", "off")
         if mode == "off":
-            return False
+            return 0
 
         needs_auth = False
         if mode == "oauth":
@@ -5011,14 +7593,46 @@ class Handler(BaseHTTPRequestHandler):
             name = params.get("name") if isinstance(params, dict) else None
             needs_auth = name in auth.get("protectedTools", [])
         if not needs_auth:
-            return False
+            return 0
 
-        if verify_bearer_access_token(bearer_token(self.headers)) is not None:
-            return False
-        self.send_auth_challenge()
-        return True
+        # The scope parameter (spec SHOULD) is added on the strict modern path
+        # only, so the legacy challenge stays byte-for-byte what it was.
+        include_scope = (
+            bool(config.get("strict2026", True))
+            and config_server_era(config) != "legacy"
+            and request_era(payload, self.headers) == "2026"
+        )
+        claims = verify_bearer_access_token(bearer_token(self.headers))
+        if claims is None:
+            self.send_auth_challenge(include_scope=include_scope)
+            return 401
+        if auth.get("enforceScope") and OAUTH_SCOPE not in str(claims.get("scope", "")).split():
+            self.send_insufficient_scope()
+            return 403
+        return 0
 
-    def send_auth_challenge(self) -> None:
+    def send_insufficient_scope(self) -> None:
+        resource_metadata = f"{self.base_url()}/.well-known/oauth-protected-resource"
+        body = json.dumps(
+            {
+                "error": "insufficient_scope",
+                "error_description": f"The access token lacks the required scope '{OAUTH_SCOPE}'.",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.send_response(403)
+        self.send_cors_headers()
+        self.send_header(
+            "WWW-Authenticate",
+            f'Bearer error="insufficient_scope", scope="{OAUTH_SCOPE}", '
+            f'resource_metadata="{resource_metadata}"',
+        )
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_auth_challenge(self, include_scope: bool = False) -> None:
         resource_metadata = f"{self.base_url()}/.well-known/oauth-protected-resource"
         body = json.dumps(
             {
@@ -5032,7 +7646,10 @@ class Handler(BaseHTTPRequestHandler):
         ).encode("utf-8")
         self.send_response(401)
         self.send_cors_headers()
-        self.send_header("WWW-Authenticate", f'Bearer resource_metadata="{resource_metadata}"')
+        challenge = f'Bearer resource_metadata="{resource_metadata}"'
+        if include_scope:
+            challenge += f', scope="{OAUTH_SCOPE}"'
+        self.send_header("WWW-Authenticate", challenge)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -5048,7 +7665,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_register(self) -> None:
         try:
             metadata = json.loads(self.read_body() or b"{}")
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             self.send_json(400, {"error": "invalid_client_metadata"})
             return
         if not isinstance(metadata, dict):

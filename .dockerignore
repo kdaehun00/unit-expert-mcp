@@ -7,3 +7,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv-sdk2026/
+benchmarks/
+.uv-cache/
+.idea/
+.claude/
