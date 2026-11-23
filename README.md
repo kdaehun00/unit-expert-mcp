@@ -21,6 +21,8 @@ GET    /mcp
 DELETE /mcp
 GET    /scenario
 POST   /scenario
+GET    /scenario/meta
+GET    /send
 GET    /inspect
 GET    /inspect/log
 ```
@@ -44,14 +46,42 @@ Content-Type: application/json
 
 ## Scenario Control
 
-Open `/scenario` in a browser to set the server-wide default scenario. The page
-also shows a live `/mcp` response preview for the selected scenario.
+브라우저에서 `/scenario`(또는 `/`)를 엽니다. 화면은 세 개이고 위쪽 내비게이션으로 오갑니다: `서버 설정`(`/scenario`), `요청 보내기`(`/send`), `요청 기록`(`/inspect`).
 
-Use `X-MCP-Test-Scenario` to override the server-wide state for one request.
-Omit it for the currently selected scenario.
+서버 설정 화면에서 고른 설정은 MCP 주소의 `cfg` 값(화면에서는 "설정 코드")에만 담깁니다. 그 주소로 온 요청에만 적용되고 서버 기본값은 바뀌지 않습니다. 폼은 기본값에서 시작합니다.
 
-The selected scenario is stored in process memory, so it resets to `ok` after a
-server restart or redeploy.
+화면이 쓰는 말: 서버 쪽은 "지원 스펙"(`serverEra`: 둘 다 `both` / 2025 방식만 `legacy` / 2026-07-28만 `modern`), 요청 쪽은 "요청 방식"(2025 방식: `initialize`로 시작 / 2026 방식: 요청마다 버전 2026-07-28을 실음)입니다.
+
+- 왼쪽(설정)
+  - ① 서버 만들기: 정상 동작하는 서버의 모양입니다. 기본 정보, 지원 스펙, 인증, 툴, 세션 카드가 항상 펼쳐져 있습니다. 드물게 쓰는 항목은 카드 안의 "세부 설정"에 있습니다.
+  - ② 에러 넣기: 일부러 실패하거나 스펙을 어기게 하는 설정입니다. "자주 쓰는 에러" 버튼(누르면 넣고 다시 누르면 뺍니다) 아래에 대상별 묶음이 있습니다: tools/call, tools/list(처음부터 펼침), 모든 요청, server/discover, 응답 형식 깨기, 2025 방식 서버가 2026-07-28 요청을 받았을 때, 직접 응답 지정.
+  - 어느 옵션이 ①이고 ②인지는 `GET /scenario/meta`의 옵션마다 있는 `section`(`build` / `error`)이 정합니다. 스펙을 지키는 서버가 가질 수 있는 설정이면 `build`, 스펙을 어기거나 실패를 흉내 내면 `error`입니다.
+  - 바꾼 옵션은 "바꿈"으로 표시되고 묶음 제목에 "바꿈 N"이 붙습니다. 지금 설정에서 효과가 없는 옵션은 흐리게 나오고 이유가 적힙니다. "설정 찾기"는 이름·키·설명으로 옵션과 에러 버튼을 찾습니다.
+  - 2026-07-28 호환 테스트(접힘): 요청 방식 × 서버의 조합 표입니다. 칸을 누르면 지원 스펙이 그 열의 값으로 바뀌고 기대 결과와 검사 명령이 나옵니다.
+  - 서버 기본값 바꾸기(접힘): 지금 설정을 서버 기본값으로 쓰기, 되돌리기, 세션 모두 끊기. 주소에 설정이 없는 모든 요청(다른 사용자 포함)에 적용됩니다. 기본값이 바뀌어 있으면 화면 위에 알림이 나옵니다.
+- 오른쪽(내 MCP 서버 주소. 좁은 화면에서는 창 위쪽에 붙습니다)
+  - 주소와 "주소 복사", 바꾼 설정 목록(칩의 ×는 그 항목만, "모두 되돌리기"는 전부), "이 주소로 온 요청 보기"(`/inspect?cfg=<코드>`), "이 주소로 요청 보내 보기"(`/send?cfg=<코드>`).
+  - 설정에 오류가 있으면 `설정 오류: <옵션 이름 (경로)> — <사유>`가 나오고, 고칠 때까지 주소가 비며 복사가 막힙니다.
+  - 더 보기: curl 두 가지, 설정 코드, `X-MCP-Test-Scenario` 헤더, 설정 JSON, 테스트 클라이언트 명령. 항목마다 복사되는 문자열이 그대로 보이고(두 줄, "전체 보기"로 펼침), 복사할 것이 없으면 이유가 적힙니다.
+  - 설정 불러오기: MCP 주소, 설정 코드(`cfg=<코드>`, `cfg:<코드>`, 헤더 한 줄 포함), 또는 설정 JSON을 붙여 넣으면 폼에 반영됩니다. 설정 JSON은 기본값과 다른 부분만 담은 객체입니다(예: `{"toolCall":{"mode":"is-error"}}`). "설정 JSON 형식"은 옵션 경로·종류·기본값·허용값 목록을 복사합니다. AI에게 주고 설정을 만들게 할 때 씁니다.
+
+화면 상태는 주소의 `#cfg=<토큰>`에 들어가므로 새로고침하거나 주소를 공유하면 같은 설정으로 열립니다. 화면이 쓰는 옵션, 그룹, 프리셋 정의는 `GET /scenario/meta`가 줍니다.
+
+### 요청 보내기 (/send)
+
+MCP 주소로 요청 하나를 만들어 보내고 응답을 봅니다. 서버 설정과 요청 기록의 링크로 오면 주소가 채워져 있습니다(`/send?cfg=<코드>` 또는 `/send?url=<주소>`). 보낸 요청은 기록에 `X-Unit-Expert-Source: inspect-console`로 남습니다.
+
+- 폼: MCP 주소, 요청 방식(2026 방식 / 2025 방식), 메서드, 툴과 인자(JSON). "보낼 헤더와 바디 직접 고치기"에서 실제로 나갈 헤더와 바디를 고칠 수 있습니다. 2025 방식은 먼저 `initialize`를 보내 받은 세션과 버전을 붙입니다(끌 수 있음).
+- 붙여 넣어 채우기: 아래 셋 중 하나를 붙여 넣으면 폼이 채워집니다. 틀린 곳은 한 줄로 알려 줍니다(예: `JSON을 읽지 못했습니다: 1번째 줄 25번째 글자 근처`).
+  1. JSON-RPC 요청 바디(`{"jsonrpc":"2.0","method":…}`). `_meta`가 있으면 2026 방식으로 봅니다.
+  2. 요청 JSON: `{"url", "mode", "method", "tool", "args", "params", "id", "headers", "omit", "body"}`. `method`만 필수입니다. `mode`는 `"2026"`(기본) 또는 `"2025"`, `omit`은 일부러 뺄 것(`meta-version`, `capabilities`, `meta`, `version-header`, `method-header`, `name-header`. 테스트 클라이언트 `call`의 `--omit-*`와 같은 이름)입니다.
+  3. curl 명령(URL, `-X`, `-H`, `-d`). 이 화면들이 만든 curl은 그대로 다시 읽습니다.
+- "요청 JSON 형식"은 2번 형식의 설명과 예 2개를 복사합니다(AI에게 주고 요청을 만들게 할 때). "지금 요청을 JSON으로", "지금 요청을 curl로"는 현재 폼을 내보냅니다.
+- 캐시 확인: 응답의 `ttlMs` 동안 같은 `tools/list`를 다시 보내지 않는 클라이언트를 흉내 냅니다.
+
+요청 하나에만 시나리오를 넣으려면 `X-MCP-Test-Scenario` 헤더를 씁니다. 헤더가 없으면 `cfg` 토큰, 그것도 없으면 서버 전역 설정이 적용됩니다.
+
+서버 전역 설정은 프로세스 메모리에 있어서 서버를 다시 시작하거나 다시 배포하면 `ok`(기본값)로 돌아갑니다.
 
 ```text
 X-MCP-Test-Scenario: duplicate-tool-name
@@ -63,7 +93,7 @@ X-MCP-Test-Scenario: duplicate-tool-name
 
 | 정책명 | 시나리오 | 효과 |
 | --- | --- | --- |
-| 정상 응답 | `ok` | 정상 Unit Expert 도구 목록을 반환합니다. |
+| 정상 응답 | `ok` | 정상 Unit Expert 툴 목록을 반환합니다. |
 
 ### 서버 error
 
@@ -75,7 +105,7 @@ X-MCP-Test-Scenario: duplicate-tool-name
 | 툴 목록 조건 - JSON-RPC 에러 | `tools-list-error` | `tools/list`에서 JSON-RPC error를 반환합니다. |
 | 툴 목록 조건 - null 반환 | `tools-list-null` | `tools/list`에서 `tools: null`을 반환합니다. |
 | 툴 목록 조건 - 빈 배열 반환 | `tools-list-empty` | `tools/list`에서 `tools: []`를 반환합니다. |
-| 툴 개수 조건 - 최대 개수 | `too-many-tools` | 도구 21개를 반환합니다. |
+| 툴 개수 조건 - 최대 개수 | `too-many-tools` | 툴 21개를 반환합니다. |
 | 응답속도 조건 - 지연 | `delayed-response` | OPTIONS가 아닌 `/mcp` 요청을 5초 지연시킵니다. |
 
 ### tool error
@@ -93,6 +123,26 @@ X-MCP-Test-Scenario: duplicate-tool-name
 | 툴 설명 조건 - 길이 | `long-description` | 1,051자 `description`을 반환합니다. |
 | 툴 설명 조건 - 서비스명 | `missing-service-name-in-description` | 서비스명이 빠진 `description`을 반환합니다. |
 | 툴 annotations 조건 - 필수 힌트 | `incomplete-annotations` | 필수 필드가 빠진 `annotations`를 반환합니다. |
+
+## 요청 기록 (/inspect)
+
+`/inspect`는 MCP 주소로 온 요청과 서버가 보낸 응답을 보여 줍니다. 서버는 가장 최근 200건만 메모리에 두고, 서버를 함께 쓰는 모든 사용자가 같은 기록을 봅니다. 요청 헤더가 그대로 남으므로 실제 서비스 토큰은 보내지 않습니다.
+
+- 어느 주소로 온 요청을 볼까요?: 맨 위의 입력란에 MCP 주소(설정 코드도 됩니다)를 붙여 넣고 "보기"를 누르면 그 주소로 온 요청만 봅니다. 그 주소에서 바꾼 설정이 칩으로 나오고 "서버 설정에서 열기", "이 주소로 요청 보내기" 링크가 붙습니다. 비우면 "모든 주소" 또는 "기본 주소만(설정 없는 `/mcp`)"을 고릅니다. 서버 설정의 "이 주소로 온 요청 보기"로 오면 주소가 채워져 있습니다(`/inspect?cfg=<코드>`, 기본 주소만은 `/inspect?plain=1`). 주소의 글자가 다르면 같은 설정이어도 다른 주소로 봅니다.
+- 최근 요청이 온 주소: 기록에 있는 주소마다 바꾼 설정 요약, 요청 수, 마지막 시각이 나오고, 누르면 그 주소를 고릅니다(`GET /inspect/log?groups=1`의 `groups`).
+- 자세히 거르기(접힘): 검색(메서드, 툴 이름, 헤더, 바디, 에러 이름, 결과), 결과, HTTP 상태, 요청 방식, 메서드, "에러만". 요청 보내기 화면에서 보낸 요청과 `OPTIONS`는 기본으로 숨깁니다. 필터가 요청을 가리면 어떤 필터가 몇 건을 가렸는지 적고 그 필터만 끄는 버튼을 줍니다. 필터는 주소의 쿼리에 들어갑니다(예: `/inspect?cfg=<코드>&kind=rejected`).
+- 목록: 최신 요청이 위입니다. 열은 시각, HTTP 메서드, 메서드와 툴 이름, 요청 방식(알 수 없으면 `-`), 서버(그 요청에 적용된 지원 스펙), 상태, 에러 코드와 이름, 결과, 넣은 에러, 소요 시간(ms), 주소(바꾼 설정 요약 또는 헤더 / 기본)입니다.
+- 결과: `정상`, `넣은 에러`, `서버가 거절`, `직접 지정`(`rawResponses` 규칙의 응답), `연결 종료`(응답 없이 끊음).
+  - `넣은 에러`는 기본 설정이었다면 달라졌을 응답입니다. 서버는 그 응답을 만든 옵션을 기록의 `injected`에 남깁니다. 예: `auth.mode=oauth`(401/403), `toolsList.mode=empty`, `toolErrors=…`, `toolCall.mode=sse`, `discover.mode=…`, `modern.testTools=false`, `initialize.protocolVersion=…`, `session.validate`.
+  - `서버가 거절`은 넣은 에러 없이 요청이 규칙에 맞지 않아 서버가 거절한 것만입니다(헤더와 바디가 다름, 잘못된 Accept, 읽을 수 없는 설정 코드 등).
+  - 늦게만 답한 응답(`server.delaySeconds=…`, `toolCall.delaySeconds=…`, `discover.delaySeconds=…`)은 내용이 그대로이므로 `정상`(거절이었다면 `서버가 거절`)으로 두고, 넣은 에러 열에 배지를 보여 줍니다.
+  - 지원 스펙(`serverEra`)과 표시용 이름(`mcp.identifier`, `mcp.serviceName`)은 `injected`에 넣지 않습니다.
+- 갱신: 2초마다 새로 온 요청만 받아 목록 위에 더합니다. 열어 둔 상세와 선택한 텍스트는 그대로입니다. 탭이 가려져 있으면 멈춥니다.
+- 상세: 행을 누르거나 Enter를 누르면 열립니다. 거절한 이유(에러 코드와 이름, `error.message`, `error.data`), 그 요청에 쓰인 설정과 온 곳, 요청·응답의 헤더와 바디가 나옵니다. 2026 방식 요청은 헤더(`MCP-Protocol-Version`·`Mcp-Method`·`Mcp-Name`·`Mcp-Param-*`)와 바디 값을 나란히 놓은 "헤더와 바디 비교" 표가 있습니다. SSE 응답은 이벤트별로 나눕니다. `Authorization` 같은 인증 값은 가리고, "값 보기"로 봅니다.
+- curl로 다시 보내기: 기록된 경로·쿼리·헤더·바디로 만든 명령을 복사합니다. 호스트는 화면을 연 주소입니다. 가린 헤더는 `<Authorization 값>`으로 들어가고, "값 보기"를 켠 뒤 복사하면 실제 값이 들어갑니다. 요청 보내기 화면에 붙여 넣으면 폼이 채워집니다.
+- 지금까지 기록 숨기기: 지금 있는 기록을 이 화면에서만 숨깁니다. 서버의 기록은 지우지 않고, "다시 보기"로 되돌립니다.
+
+기록 항목의 필드와 `GET /inspect/log`의 쿼리는 `docs/CONFIG_REFERENCE.md`의 "`/inspect` 기록"에 있습니다.
 
 ## 2026-07-28 지원 범위
 
@@ -122,7 +172,7 @@ X-MCP-Test-Scenario: duplicate-tool-name
 전체 차이는 [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md)의 "`strict2026`에 따른 모던 경로 차이" 표에 있습니다. 예전의 느슨한 동작이 필요하면 `strict2026`을 끕니다. 레거시 경로는 이 값의 영향을 받지 않습니다.
 
 ```text
-/scenario 화면: "프로토콜 주입 설정" 카드의 "스펙 준수 모드"를 끕니다.
+/scenario 화면: "지원 스펙" 카드의 "엄격 검증"을 끕니다.
 요청 헤더:      X-MCP-Test-Scenario: lenient-2026
 cfg 토큰:       {"strict2026": false}
 ```
@@ -161,7 +211,7 @@ PYTHONPATH=src python -c 'from unit_expert_mcp.server import encode_config_token
 | 그룹 | 하는 일 | 헤더 시나리오 예 |
 | --- | --- | --- |
 | `discover.*` | `server/discover` 응답을 바꿉니다. 레거시 버전만 광고, 빈 목록, JSON-RPC 에러, `-32020`/`-32022`, 401/403/5xx, SSE, id 불일치, 깨진 JSON, 연결 종료, 지연 | `discover-no-modern-version` |
-| `legacyModernProbe.*` | `serverEra: legacy`인 서버가 모던 요청에 주는 응답을 고릅니다. `-32601`, `-32602`, 400(Python SDK 1.x와 같은 본문), 404, 빈 400, 무응답 | `legacy-probe-http-400` |
+| `legacyModernProbe.*` | `serverEra: legacy`인 서버가 모던 요청에 주는 응답을 고릅니다. `-32601`, `-32602`, 400(Python SDK 1.x와 같은 바디), 404, 빈 400, 무응답 | `legacy-probe-http-400` |
 | `toolCall.*` | `tools/call` 응답을 바꿉니다(두 경로 공용). `isError`, JSON-RPC 에러, HTTP 오류, SSE, id 불일치, 빈 바디, 연결 종료, 지연 | `tool-call-sse` |
 | `modernResponse.*` | 정상인 모던 결과에 위반을 넣습니다. `resultType` 누락·변조, serverInfo 누락, 캐시 필드 누락, `Mcp-Session-Id` 발급 | `modern-result-type-omit` |
 | `modern.*` | 테스트 툴 노출, 필수 클라이언트 capability(`-32021`), `-32602`의 HTTP 상태, 바디에 값이 없는 `Mcp-Param-*`의 처리 | `require-capability-elicitation` |
@@ -171,15 +221,27 @@ PYTHONPATH=src python -c 'from unit_expert_mcp.server import encode_config_token
 | `allowedOrigins` | 목록에 없는 `Origin`을 403으로 거부합니다. 비어 있으면(기본) 검증하지 않습니다 | - |
 | `rawResponses` | 메서드별로 적어 둔 응답을 그대로 돌려줍니다 | - |
 
-`/inspect` 화면은 최근 `/mcp` 요청과 응답, 그 응답을 만든 주입 옵션을 보여줍니다.
+`/inspect` 화면은 서버가 메모리에 둔 `/mcp` 요청과 응답(가장 최근 200건), 그 응답을 만든 옵션(넣은 에러)을 보여줍니다(위 "요청 기록 (/inspect)" 참고).
 
 ## 테스트 클라이언트
 
 `unit_expert_mcp.client`는 게이트웨이나 서버에 모던 또는 레거시 클라이언트로 붙는 CLI입니다. 표준 라이브러리만 씁니다.
 
 ```bash
-PYTHONPATH=src python -m unit_expert_mcp.client <명령> --url http://localhost:8000/mcp
+PYTHONPATH=src python3 -m unit_expert_mcp.client <명령> --url http://localhost:8000/mcp
 # 패키지를 설치했다면: unit-expert-client <명령> --url ...
+```
+
+클라이언트 명령은 `python3`으로 적습니다(`/scenario` 화면과 `GET /scenario/meta`가 주는 명령과 같습니다). Python 3.11 이상이 필요하고 저장소 루트에서 실행합니다. 가상환경이나 설치한 명령으로 실행하려면 아래처럼 합니다.
+
+```bash
+# 1) 가상환경의 파이썬을 직접 지정 (저장소 루트에서)
+python3 -m venv .venv
+PYTHONPATH=src .venv/bin/python -m unit_expert_mcp.client probe --url http://localhost:8000/mcp
+
+# 2) 설치한 뒤 명령 이름으로 실행 (PYTHONPATH가 필요 없습니다)
+.venv/bin/pip install -e .
+.venv/bin/unit-expert-client probe --url http://localhost:8000/mcp
 ```
 
 | 명령 | 하는 일 |
@@ -229,12 +291,12 @@ PYTHONPATH=src python -m unit_expert_mcp.client <명령> --url http://localhost:
 ```bash
 # 로컬 서버의 세 세대를 차례로 검사
 for era in both legacy modern; do
-  PYTHONPATH=src python -m unit_expert_mcp.client run all \
+  PYTHONPATH=src python3 -m unit_expert_mcp.client run all \
     --url http://localhost:8000/mcp --cfg-json "{\"serverEra\":\"$era\"}"
 done
 
 # 규격을 어긴 요청 하나
-PYTHONPATH=src python -m unit_expert_mcp.client call tools/list \
+PYTHONPATH=src python3 -m unit_expert_mcp.client call tools/list \
   --url http://localhost:8000/mcp --version-header 2025-11-25 -v
 ```
 
@@ -263,15 +325,15 @@ export UNIT_EXPERT_CLIENT_BEARER=<게이트웨이 토큰>
 각 조합에서 먼저 `probe`로 게이트웨이가 클라이언트에게 어떤 세대로 보이는지 확인하고, 이어서 `run`을 실행합니다.
 
 ```bash
-PYTHONPATH=src python -m unit_expert_mcp.client probe
+PYTHONPATH=src python3 -m unit_expert_mcp.client probe
 ```
 
-| 조합 | 업스트림 등록 | 클라이언트 명령 (`PYTHONPATH=src python -m unit_expert_mcp.client` 뒤에) | 기대 결과 |
+| 조합 | 업스트림 등록 | 클라이언트 명령 (`PYTHONPATH=src python3 -m unit_expert_mcp.client` 뒤에) | 기대 결과 |
 | --- | --- | --- | --- |
-| modern client → modern server | modern URL | `run modern modern-violation compat-modern-client --expect gateway` | 스펙대로면 동작합니다. 게이트웨이 기대값은 미확정입니다. |
-| modern client → legacy server | legacy URL | `run modern compat-modern-client --expect gateway` | 게이트웨이가 모던 요청을 레거시 업스트림 호출로 바꿔 주면 동작합니다. 바꿔 주는지는 미확정입니다. 서버에 직접 붙으면 모던 클라이언트는 실패합니다(DiscoverResult를 받지 못함). |
-| legacy client → legacy server | legacy URL | `run legacy compat-legacy-client --expect gateway` | 동작합니다. `initialize`의 협상 버전은 `2025-06-18`, 세션 없는 요청은 400 + `-32600`, 모르는 세션은 404 + `-32600`입니다(게이트웨이 코드로 확인한 기대값). |
-| legacy client → modern server (미지원 확인) | modern URL | `run legacy compat-legacy-client --expect gateway` | 실패해야 합니다. 서버에 직접 붙으면 `initialize`가 400 + `-32022`이고 에러에 지원 버전이 적힙니다. 게이트웨이를 거치면 실패가 어느 단계(`initialize`, `tools/list`, `tools/call`)에서 어떤 상태와 코드로 드러나는지 미확정입니다. `-v`로 실제 응답을 기록합니다. |
+| 2026 방식 요청 → 2026-07-28만 지원하는 서버 | modern URL | `run modern modern-violation compat-modern-client --expect gateway` | 스펙대로면 동작합니다. 게이트웨이 기대값은 미확정입니다. |
+| 2026 방식 요청 → 2025 방식만 지원하는 서버 | legacy URL | `run modern compat-modern-client --expect gateway` | 게이트웨이가 모던 요청을 레거시 업스트림 호출로 바꿔 주면 동작합니다. 바꿔 주는지는 미확정입니다. 서버에 직접 붙으면 모던 클라이언트는 실패합니다(DiscoverResult를 받지 못함). |
+| 2025 방식 요청 → 2025 방식만 지원하는 서버 | legacy URL | `run legacy compat-legacy-client --expect gateway` | 동작합니다. `initialize`의 협상 버전은 `2025-06-18`, 세션 없는 요청은 400 + `-32600`, 모르는 세션은 404 + `-32600`입니다(게이트웨이 코드로 확인한 기대값). |
+| 2025 방식 요청 → 2026-07-28만 지원하는 서버 (미지원 확인) | modern URL | `run legacy compat-legacy-client --expect gateway` | 실패해야 합니다. 서버에 직접 붙으면 `initialize`가 400 + `-32022`이고 에러에 지원 버전이 적힙니다. 게이트웨이를 거치면 실패가 어느 단계(`initialize`, `tools/list`, `tools/call`)에서 어떤 상태와 코드로 드러나는지 미확정입니다. `-v`로 실제 응답을 기록합니다. |
 
 - `--expect gateway`에서는 게이트웨이 기대값이 미확정인 시나리오를 SKIP으로 표시합니다. 스펙 기대값으로라도 실행하려면 `--include-unconfirmed`를 붙입니다. 어떤 시나리오가 확정·조건부·미확정인지는 `list --expect gateway`로 봅니다.
 - 조합별 서버 쪽 기준값은 게이트웨이 없이 서버에 직접 붙어 얻습니다. 예: `run legacy compat --url <서버>/mcp --cfg-json '{"serverEra":"modern"}'`.

@@ -11,11 +11,13 @@
 | `cfg` 쿼리 | `/mcp?cfg=<토큰>`. 토큰은 기본값과 다른 부분만 담은 JSON을 base64url로 인코딩한 것(`encode_config_token`) | 그 URL로 온 요청 |
 | `X-MCP-Test-Scenario` 헤더 | 시나리오 이름 하나, 쉼표로 이은 여러 개(왼쪽부터 적용), 또는 `cfg:<토큰>` | 그 요청 하나 |
 | `POST /scenario` | `{"config": {...}}` 또는 `{"scenario": "<이름>"}` | 서버 전역(활성 설정) |
-| `/scenario` 화면 | "프로토콜 주입 설정" 카드에서 고르고 적용하면 `cfg` URL이 만들어진다 | 그 URL로 온 요청 |
+| `/scenario` 화면 | 옵션이나 프리셋을 고르면 MCP URL 카드에 `cfg` URL이 만들어진다(적용 버튼 없음) | 그 URL로 온 요청 |
 
 - 우선순위는 `cfg` 쿼리, `X-MCP-Test-Scenario` 헤더, 활성 설정 순이다.
 - 잘못된 값은 `normalize_config`가 `ValueError`로 거부한다. `/mcp`에서는 HTTP 400(평문), `POST /scenario`에서는 `{"ok": false, "error": ...}`가 된다.
 - `rawResponses` 규칙은 아래 모든 옵션보다 먼저 응답한다.
+- 설정을 적용하지 않고 검사만 하거나 토큰을 풀어 보려면 `POST /scenario`의 `validate`, `decode` 액션을 쓴다(아래 "`POST /scenario` 액션").
+- 화면이 쓰는 옵션 목록·그룹·프리셋은 `GET /scenario/meta`가 준다(아래 "`GET /scenario/meta`").
 
 ## 용어
 
@@ -27,7 +29,7 @@
 
 | 키 | 값 | 기본 | 효과 | 적용 era |
 |---|---|---|---|---|
-| `protocolEra` | `2025`, `2026` | `2025` | `/scenario` 화면의 미리보기가 어느 방식으로 요청을 보낼지만 정한다. 서버 동작에는 영향이 없다 | 화면 |
+| `protocolEra` | `2025`, `2026` | `2025` | 서버 동작에는 영향이 없다(예전 화면이 쓰던 요청 방식 표시) | 화면 |
 | `serverEra` | `both`, `legacy`, `modern` | `both` | `both`는 두 경로를 모두 처리한다. `legacy`는 2026을 모르는 서버처럼 동작한다(`legacyModernProbe` 참고). `modern`은 2026 전용이라 레거시 요청을 400 + `-32022`로 거부한다 | 둘 다 |
 | `rejectLegacy` | bool | `false` | `serverEra: "modern"`의 옛 이름. 정규화하면 항상 `serverEra == "modern"`과 같은 값이 된다 | 둘 다 |
 | `strict2026` | bool | `true` | `true`면 모던 경로가 공식 스펙대로 동작한다. `false`면 이전의 느슨한 동작으로 돌아간다(아래 표). 레거시 경로에는 영향이 없다 | 모던 |
@@ -338,7 +340,7 @@
 
 ## `X-MCP-Test-Scenario` 헤더 전용 이름
 
-README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 수 있다. `/scenario` 화면의 시나리오 목록에는 나오지 않는다.
+README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 수 있다. `/scenario` 화면에는 시나리오 이름 목록이 없고 옵션과 프리셋만 있으므로, 이 이름들은 `X-MCP-Test-Scenario` 헤더로만 쓴다. 같은 설정을 화면에서 만들려면 오른쪽 "설정" 열의 옵션을 고른다. 전체 이름 목록은 `GET /scenario/meta`의 `scenarioHeaders`에 있다.
 
 | 이름 | 설정 |
 |---|---|
@@ -360,8 +362,136 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 
 쉼표로 여러 개를 이을 수 있다. 예: `server-era-modern,discover-sse,tool-call-empty`. 모르는 이름은 무시한다.
 
+## `POST /scenario` 액션
+
+`Content-Type: application/json` 바디에 `action`이 있으면 액션으로 처리한다. 어느 액션도 활성 설정(서버 전역)을 바꾸지 않는다. 실패하면 HTTP 400 + `{"ok": false, "error": "<문구>"}`다.
+
+| 요청 | 성공 응답(HTTP 200) | 하는 일 |
+|---|---|---|
+| `{"action": "validate", "config": {...}}` | `{"ok": true, "action": "validate", "config": <정규화된 전체 설정>, "compact": <기본값과 다른 부분>, "token": "<cfg 토큰>"}` | 설정을 `normalize_config`로 검사하고 토큰을 만든다. 잘못된 값이면 `error`에 `normalize_config`의 문구가 그대로 온다. `config`가 객체가 아니면 `config must be an object` |
+| `{"action": "decode", "token": "<값>"}` | `validate`와 같은 형태(`action`은 `decode`) | 토큰을 설정으로 푼다. `token`에는 토큰, `cfg=<토큰>`, `cfg:<토큰>`, `cfg` 쿼리가 든 URL(`/mcp?cfg=...`, `https://.../mcp?cfg=...`)을 줄 수 있다. 응답의 `token`은 다시 인코딩한 값이라 입력과 다를 수 있다(예: `rejectLegacy`만 든 옛 토큰) |
+| `{"action": "expireSessions"}` | `{"ok": true, "action": "expireSessions", "expired": <개수>}` | 발급된 세션을 모두 잊는다("레거시 세션" 참고) |
+
+- 기본 설정의 토큰은 빈 문자열이다(`compact`는 `{}`).
+- `decode`의 실패 문구: 토큰이 base64url·JSON이 아니면 `invalid config token`, URL에 `cfg`가 없으면 `no cfg parameter in the URL`, 문자열이 아니거나 비어 있으면 `token must be a non-empty string`, 토큰 안의 값이 틀리면 `normalize_config`의 문구.
+- 모르는 액션은 `unknown action '<이름>'`이다.
+
+## `GET /scenario/meta`
+
+화면이 설정 폼을 그릴 때 쓰는 메타데이터(JSON)다. `server.py`의 `scenario_meta()`가 만들고, 활성 설정과 상관없이 항상 같은 값이다.
+
+| 키 | 내용 |
+|---|---|
+| `defaults` | `DEFAULT_CONFIG` 전체 |
+| `sections` | 화면의 두 부분. 항목은 `id`, `label`, `description`. `build`(서버 만들기: 스펙을 지키는 서버가 가질 수 있는 설정), `error`(에러 넣기: 스펙을 어기거나 실패를 흉내 내는 설정) |
+| `groups` | 순서 있는 그룹 목록. 항목은 `id`, `section`, `open`(화면에서 처음부터 펼쳐 두는지), `label`, `description`. `build`: `basic`(기본 정보), `protocol`(지원 스펙), `auth`(인증), `tools`(툴), `session`(세션). `error`: `errToolCall`(tools/call), `errToolsList`(tools/list), `errAll`(모든 요청), `errDiscover`(server/discover), `errModernResponse`(응답 형식 깨기), `errLegacyProbe`(2025 방식 서버가 2026-07-28 요청을 받았을 때), `errRaw`(직접 응답 지정) |
+| `options` | 화면에서 바꿀 수 있는 옵션 목록(그룹 순서). 항목 형식은 아래 표 |
+| `excluded` | `options`에 넣지 않은 `DEFAULT_CONFIG` 키와 이유: `protocolEra`, `rejectLegacy`, `customHeader.name`, `customHeader.value` |
+| `presets` | 미리 만들어 둔 부분 설정. 항목은 `id`, `label`, `description`, `category`, `section`, `patch`(기본 설정에 병합할 부분 설정). `section`은 `patch`가 `error` 옵션을 하나라도 바꾸면 `error`, 아니면 `build`다. 화면의 "자주 쓰는 에러" 버튼은 `error`인 것만 보여 준다 |
+| `scenarioHeader` | 헤더 이름 `X-MCP-Test-Scenario` |
+| `scenarioHeaders` | 그 헤더에 쓸 수 있는 값 목록. 항목은 `name`, `kind`, `title`, `description`, `patch` |
+| `errorCodes` | 이 서버가 내는 JSON-RPC 에러 코드. 항목은 `code`, `name`, `description` |
+
+`options` 항목:
+
+| 필드 | 내용 |
+|---|---|
+| `path` | 설정 경로. 예: `toolCall.mode` |
+| `label`, `description` | 짧은 이름과 한 줄 설명 |
+| `kind` | `bool`, `enum`, `int`, `float`, `string`, `list`, `json` |
+| `choices` | 고를 수 있는 값 목록 `[{value, description}]`, 없으면 `null`. `enum`에는 항상 있고, 항목이 정해진 `list`(`toolErrors`, `modernResponse.methods`, `modern.requiredClientCapabilities`)에도 있다. `serverEra`, `auth.mode`, `toolErrors`의 항목에는 화면에 보일 이름 `label`도 있다 |
+| `min`, `max` | `int`, `float`의 허용 범위. 그 밖에는 `null` |
+| `group` | `groups`의 id |
+| `section` | `build` 또는 `error`. 그 옵션이 속한 그룹의 `section`과 같다 |
+| `appliesTo` | `both`, `legacy`, `modern`. 이 문서 표의 "적용 era" 열과 같다 |
+| `dependsOn` | 이 조건일 때만 효과가 있다. `{"path": "<다른 옵션>", "in": [<값>...]}` 또는 `{"path": "<다른 옵션>", "min": <최솟값>}`. 조건이 없으면 `null` |
+| `default` | 기본값 |
+| `strictOnly` | `true`면 `strict2026`이 꺼졌을 때 적용되지 않는 옵션(`discover.*`, `modernResponse.*`, `modern.*`). 그 밖의 옵션에는 이 키가 없다 |
+| `detail` | `true`면 드물게 쓰는 옵션. 화면은 그룹 안의 "세부 설정"에 접어 둔다. 그 밖의 옵션에는 이 키가 없다 |
+| `maxLength`, `maxItems`, `suggestions`, `itemFields` | 일부 옵션에만 있는 보조 정보. `suggestions`는 자유 입력 문자열(`initialize.protocolVersion`)의 추천값 |
+
+`presets`의 `category`:
+
+- `matrix`: README "게이트웨이 테스트 매트릭스"의 네 조합. `patch`(`serverEra`) 외에 `clientMode`(`modern`/`legacy`), `expect`(기대 결과 한 줄), `cli`(클라이언트 명령. `{url}`은 클라이언트가 붙을 MCP 엔드포인트 자리)가 있다.
+- `injection`: 자주 쓰는 주입. id는 `auth-oauth-401`, `response-delay`, `tools-list-error`, `tools-list-empty`, `tools-list-paged`, `tool-call-is-error`, `tool-call-json-rpc-error`, `tool-call-http-500`, `tool-call-disconnect`, `tool-call-sse`, `discover-no-modern-version`, `discover-http-5xx`, `legacy-probe-http-400`, `session-validate`.
+
+`scenarioHeaders`의 `kind`는 `scenario`(README 표의 시나리오. `POST /scenario`의 `{"scenario": ...}`에도 쓸 수 있다), `header-only`(위 "헤더 전용 이름"), `pattern`(`initialize-version-<버전>`, `cfg:<토큰>`처럼 일부가 변수인 이름. `patch`는 `null`)이다.
+
 ## `/inspect` 기록
 
-`/inspect/log`의 각 항목에 `injected` 배열이 있다. 그 응답을 만든 옵션 이름이 들어간다(예: `["toolCall.mode=sse", "toolCall.delaySeconds=2"]`, `["legacyModernProbe.mode=http-404"]`, `["strict2026=false"]`). 주입이 없으면 빈 배열이다. 화면에는 "주입 N" 배지와 응답 제목 옆 목록으로 나온다.
+`/mcp`로 나간 응답은 모두 한 요청에 한 건씩 기록한다. 가장 최근 200건만 프로세스 메모리에 두고 더 오래된 것은 버린다. `/inspect` 화면도 같은 200건까지만 든다. 다른 경로(`/scenario`, `/inspect/log` 등)는 기록하지 않는다.
 
-SSE 응답은 `responseBody.events`, 평문 응답은 `responseBody.text`, 끊은 연결은 `responseBody.disconnect: true`로 기록한다.
+`GET /inspect/log`는 `{"exchanges": [...]}`를 준다. 최신 항목이 앞이다. 선택 쿼리:
+
+| 쿼리 | 동작 |
+|---|---|
+| (없음) | 전체 기록 |
+| `since=<seq>` | `seq`가 그 값보다 큰 항목만 |
+| `cfg=<토큰>` | 요청 URL의 `cfg`가 그 토큰과 같은 항목만. 빈 값 `cfg=`는 `cfg`가 없던 요청만 |
+| `limit=<n>` | 위 조건으로 거른 뒤 최신 n건 |
+| `groups=1` | 응답에 `groups`를 더한다: 기록 전체를 MCP 주소(`cfg`)별로 합친 목록. 항목은 `cfg`(설정 없는 주소는 `null`), `count`(요청 수, `OPTIONS` 제외), `screen`(그중 화면이 보낸 요청 수), `lastSeq`, `lastTimestamp`. 마지막 요청이 최신인 주소가 앞이다. 다른 쿼리(`since`, `cfg`, `limit`)는 `exchanges`만 거르고 `groups`에는 영향이 없다 |
+
+- 쿼리는 함께 쓸 수 있다. 예: `/inspect/log?since=120&cfg=eyJzZXJ2ZXJFcmEiOiJsZWdhY3kifQ&limit=50`.
+- `since`, `limit`이 0 이상의 정수가 아니면 HTTP 400 + `{"ok": false, "error": "<이름> must be a non-negative integer"}`다. 모르는 쿼리는 무시한다.
+- `cfg` 비교는 토큰 문자열 그대로 한다. 같은 설정이라도 토큰 문자열이 다르면 다른 것으로 본다.
+
+항목의 필드:
+
+| 필드 | 내용 |
+|---|---|
+| `seq` | 1부터 커지는 일련번호 |
+| `time` | UTC `HH:MM:SS` |
+| `timestamp` | ISO 8601 UTC, 밀리초까지. 예: `2026-01-02T03:04:05.678Z` |
+| `durationMs` | 요청을 받은 때부터 응답을 다 보낼 때까지의 시간(ms, 소수 1자리). 주입한 지연이 포함된다. 기록 시점(응답을 보내기 직전)에 그때까지의 값이 들어가고, 응답을 다 보낸 뒤 최종 값으로 바뀐다 |
+| `httpMethod`, `path` | HTTP 메서드와 경로(`/mcp`) |
+| `query` | 요청 URL의 쿼리 문자열 원본. 없으면 빈 문자열 |
+| `cfg` | 요청 URL의 `cfg` 토큰. 없거나 빈 값이면 `null` |
+| `configSource` | 그 요청의 설정이 어디서 왔는지. `url`(`cfg` 쿼리), `header`(`X-MCP-Test-Scenario`), `global`(활성 설정) |
+| `source` | 요청 헤더 `X-Unit-Expert-Source`의 값. 없으면 `null`. 화면이 보내는 값은 `inspect-console`(`/send` 요청 보내기 화면)이다. `/inspect` 화면은 이 값이 있는 요청을 모두 "요청 보내기 화면에서 보낸 요청"으로 다룬다 |
+| `era` | 요청이 모던(`2026`)인지 레거시(`2025`)인지 |
+| `method` | JSON-RPC 메서드. 바디가 없거나 읽지 못했으면 `null` |
+| `requestHeaders` | `Accept`, `Content-Type`, `Authorization`과 `Mcp-`·`X-Mcp-`로 시작하는 헤더. 값은 받은 그대로다(가리지 않는다) |
+| `requestBody` | 요청 바디. JSON으로 읽히지 않으면 원문 문자열, 바디를 읽지 않는 요청(GET, DELETE, OPTIONS, 405)은 `null` |
+| `status` | 응답 HTTP 상태. 응답 없이 연결을 끊은 경우는 `0` |
+| `responseBody` | 응답 본문. 아래 참고 |
+| `rawResponse` | `rawResponses` 규칙으로 답했으면 `true` |
+| `responseHeaders` | 주입으로 붙인 응답 헤더, `rawResponses` 규칙의 헤더, 405의 `Allow` |
+| `serverEra` | 적용된 설정의 `serverEra`. 설정을 읽지 못했거나 기록 시점에 정해지지 않았으면 `null` |
+| `injected` | 그 응답을 만든 옵션 이름 |
+
+`injected`에는 그 응답을 만든 옵션 이름이 들어간다(예: `["toolCall.mode=sse", "toolCall.delaySeconds=2"]`, `["legacyModernProbe.mode=http-404"]`, `["strict2026=false"]`, `["customHeader.enabled"]`, `["server.httpStatus=401"]`). 주입이 없으면 빈 배열이다. 화면에는 목록의 주입 칸과 상세의 "주입으로 만든 응답"에 나온다.
+
+기준은 "기본 설정이었다면 이 응답이 달라졌을 옵션"이다. 옵션이 켜져 있어도 그 요청의 응답을 바꾸지 않았으면 들어가지 않는다(예: `auth.mode=oauth`에 유효한 토큰으로 온 요청, `customHeader.enabled`에 맞는 헤더로 온 요청). 위 예에 더해 아래 이름이 들어간다.
+
+| 이름 | 들어가는 응답 |
+|---|---|
+| `auth.mode=oauth`, `auth.mode=mixed-oauth` | 그 모드가 낸 401. 403(`insufficient_scope`)에는 `auth.enforceScope`가 함께 들어간다 |
+| `toolsList.mode=<값>` | `normal`이 아닌 모드의 tools/list 응답. `too-many`에서 개수를 바꿨으면 `toolsList.tooManyCount=<N>`도 |
+| `toolsList.duplicateToolName`, `toolErrors=<이름,이름>` | 툴 정의를 바꾼 tools/list 응답 |
+| `toolsList.cacheTtlMs=<N>`, `toolsList.cacheScope=public` | 기본값과 다른 캐시 힌트가 들어간 모던 tools/list 결과 |
+| `discover.cacheTtlMs=<N>`, `discover.cacheScope=public` | 기본값과 다른 캐시 힌트가 들어간 DiscoverResult |
+| `modern.testTools=false` | 테스트 툴이 빠진 모던 tools/list 결과, 테스트 툴 이름으로 온 tools/call의 `Unknown tool` |
+| `modern.invalidParamsHttpStatus=400` | HTTP 400으로 나간 -32602 |
+| `modern.rejectUnexpectedParamHeader=false` | 기본 설정이면 -32020으로 거부했을 `Mcp-Param-*` 헤더를 무시하고 처리한 tools/call |
+| `initialize.protocolVersion=<버전>`, `initialize.protocolVersionEnabled=false` | 기본 설정의 응답 버전(`2025-03-26`)과 다른 버전이 나간 initialize 결과 |
+| `server.delaySeconds=<초>` | `server.delayEnabled`로 늦춘 모든 응답. 다른 이름 뒤에 붙는다 |
+
+`serverEra`와 `mcp.identifier`, `mcp.serviceName`은 `injected`에 넣지 않는다. 서버 세대는 항목의 `serverEra` 필드에 따로 있고, 두 이름은 응답에 실리는 표시용 값이다. 화면은 `…delaySeconds=…`만 있는 응답을 주입으로 세지 않고(내용이 그대로이므로 `정상` 또는 `검증 거부`) 지연 배지만 보여 준다.
+
+`responseBody`의 형태: JSON 응답은 그 JSON, SSE 응답은 `{"events": [...]}`, 주입한 평문 응답은 `{"text": "..."}`, 끊은 연결은 `{"disconnect": true}`, 서버가 거부하며 보낸 평문(401/403, 잘못된 `cfg`, Accept 오류, 405 등)은 `{"error": "<평문>"}`, OAuth 401/403은 `{"error": "invalid_token"}`/`{"error": "insufficient_scope"}`, 열린 GET 스트림은 `{"text": ": connected"}`, 본문 없는 응답은 `null`이다.
+
+JSON-RPC 처리 전에 끝나는 응답도 기록한다:
+
+| 경우 | 상태 | `responseBody` | `injected` |
+|---|---|---|---|
+| `customHeader.enabled`: 헤더 없음 / 값 다름 | 401 / 403 | `{"error": "Unauthorized"}` / `{"error": "Forbidden"}` | `["customHeader.enabled"]` |
+| `server.httpStatus` 401 / 403 | 401 / 403 | 위와 같음 | `["server.httpStatus=401"]` / `["server.httpStatus=403"]` |
+| 잘못된 `cfg` 토큰(POST, GET) | 400 | `{"error": "invalid config token"}` 등 | `[]` |
+| 레거시 요청의 Accept 오류(POST), GET의 Accept 오류 | 400 | `{"error": "Invalid Accept ..."}` | `[]` |
+| 세션 헤더 없는 GET(`session.validate` 꺼짐) | 400 | `{"error": "Session ID required in mcp-session-id header"}` | `[]` |
+| 열린 GET 스트림 | 200 | `{"text": ": connected"}` | `[]` |
+| 405(모던 요청의 GET·DELETE, 허용하지 않는 DELETE, `PUT`·`PATCH`·`HEAD` 등) | 405 | `{"error": "Method Not Allowed"}`, `responseHeaders.Allow` | `[]` |
+| OAuth 401/403(POST, GET, DELETE) | 401 / 403 | `{"error": "invalid_token"}` / `{"error": "insufficient_scope"}` | `["auth.mode=<모드>"]` / `["auth.mode=<모드>", "auth.enforceScope"]` |
+| `OPTIONS /mcp`(CORS 사전 요청) | 204 | `null` | `[]` |
+
+`X-Unit-Expert-Source`는 기록에만 쓴다. 어느 경로의 검증에도 걸리지 않고, 있든 없든 응답은 같다.
