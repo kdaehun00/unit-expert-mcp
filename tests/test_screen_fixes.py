@@ -318,7 +318,7 @@ class ScreenLogicTest(UiCoreTestCase):
         )
         self.assertEqual([result["value"] for result in results], [True, True, True, False])
 
-    def test_option_search_reads_the_help_lines_too(self) -> None:
+    def test_option_search_reads_only_what_the_page_shows(self) -> None:
         results = self.run_calls(
             [
                 ["matchOptionSearch", self.options["strict2026"], "필수 헤더"],
@@ -326,7 +326,7 @@ class ScreenLogicTest(UiCoreTestCase):
                 ["matchOptionSearch", self.options["mcp.serviceName"], "curl"],
             ]
         )
-        self.assertEqual([result["value"] for result in results], [True, True, False])
+        self.assertEqual([result["value"] for result in results], [False, False, False])
 
 
 class PageWordingTest(unittest.TestCase):

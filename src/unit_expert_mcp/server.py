@@ -6826,7 +6826,7 @@ var UnitExpertUI = (function () {
   function matchOptionSearch(option, query) {
     var words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) return true;
-    var parts = [option.label, option.path, option.description].concat(option.help || []);
+    var parts = [option.label, option.path, option.description];
     (option.choices || []).concat(option.suggestions || []).forEach(function (choice) {
       parts.push(String(choice.value), choice.label || "", choice.description || "");
     });
@@ -8238,12 +8238,12 @@ def _option_text(choice: dict[str, Any]) -> str:
 
 
 def _help_box(option: dict[str, Any]) -> str:
-    """The lines of ``help`` as a list under the control, always in view. Empty when the option has none."""
-    lines = option.get("help") or []
-    if not lines:
-        return ""
-    items = "".join(f"<li>{escape(line)}</li>" for line in lines)
-    return f'<ul class="opt-help">{items}</ul>'
+    """Nothing: the page shows only the one-line description.
+
+    The longer ``help`` lines stay in ``/scenario/meta`` and the config reference; on the page
+    they made every row a wall of text.
+    """
+    return ""
 
 
 def render_option(option: dict[str, Any]) -> str:

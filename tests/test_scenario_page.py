@@ -149,7 +149,7 @@ class ScenarioPageStructureTest(unittest.TestCase):
                 self.assertIn(option["description"], row_text)
                 self.assertIn("기본값:", row_text)
                 for line in option.get("help") or []:
-                    self.assertIn(line, row_text)
+                    self.assertNotIn(line, row_text)
                 control = controls[option["path"]]
                 if option["path"] != "serverEra":
                     described_by = control["attrs"]["aria-describedby"]
@@ -280,18 +280,15 @@ class ScenarioPageStructureTest(unittest.TestCase):
     def test_strict_and_origin_say_what_they_check(self) -> None:
         rows = {e["attrs"]["data-opt"]: e for e in self.dom.elements if "data-opt" in e["attrs"]}
         strict = rows["strict2026"]["text"]
-        for text in ("필수 헤더", "헤더와 바디 일치", "_meta 필수 값", "HTTP 400", "-32020", "-32602",
-                     "-32022", "끄면 통과되는 것", "꺼도 검사하는 것"):
+        for text in ("헤더와 바디를 스펙대로 검사", "HTTP 400"):
             with self.subTest(option="strict2026", text=text):
                 self.assertIn(text, strict)
         origin = rows["allowedOrigins"]["text"]
-        for text in ("브라우저가 요청에 붙이는 출발지 주소", "HTTP 403", "비워 두면 검사하지 않습니다",
-                     "Origin 헤더가 없는 요청(curl", "https://app.example.com"):
+        for text in ("브라우저가 요청에 붙이는 출발지 주소", "HTTP 403"):
             with self.subTest(option="allowedOrigins", text=text):
                 self.assertIn(text, origin)
-        # The lines are a plain list under the control, in view without a click.
-        helps = [e for e in self.dom.by_tag("ul") if e["attrs"].get("class") == "opt-help"]
-        self.assertEqual(len(helps), len([o for o in self.meta["options"] if o.get("help")]))
+        # Only the one-line description is on the page; the long lists stay in the meta JSON.
+        self.assertEqual([e for e in self.dom.by_tag("ul") if e["attrs"].get("class") == "opt-help"], [])
 
     def test_every_preset_has_a_button(self) -> None:
         buttons = {
