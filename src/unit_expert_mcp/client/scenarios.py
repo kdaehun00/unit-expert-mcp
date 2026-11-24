@@ -22,7 +22,14 @@ from typing import Any
 from . import oauth
 from . import protocol as p
 from .clients import ProbeResult, probe
-from .runner import Context, Gateway, Scenario, Stop
+from .runner import (
+    MULTI_ROUND_INPUT_ARGS,
+    MULTI_ROUND_INPUT_TOOL,
+    Context,
+    Gateway,
+    Scenario,
+    Stop,
+)
 from .transport import Exchange, deep_merge, origin_of
 
 _COND_NOTE = "게이트웨이 코드 조사로 확인한 동작이지만 실제 요청 경로에 적용되는지는 미확인"
@@ -437,6 +444,82 @@ def input_required_roundtrip(c: Context) -> None:
         sent_state = (retry_body.get("params") or {}).get("requestState")
         c.check("requestState를 그대로 되돌림", sent_state == state, repr(state), repr(sent_state))
     c.expect_result(exchanges[-1])
+    c.note(f"툴 {tool['name']}, 왕복 {len(exchanges) - 1}회")
+
+
+@scenario(
+    "input-required-multi-round",
+    "modern",
+    "1차·2차 응답이 input_required, 3차가 complete. 재요청마다 직전 응답의 requestState와 그 라운드의 "
+    "inputResponses만 보내고 JSON-RPC id를 바꿈",
+    "mrtr(InputRequiredResult, 재요청 규칙, 여러 라운드)",
+    Gateway(
+        "unknown",
+        "게이트웨이 기대값 미확정: 여러 라운드의 input_required 재요청을 어떻게 중계하는지 확인하지 못함",
+    ),
+    needs="modern",
+)
+def input_required_multi_round(c: Context) -> None:
+    tool = next(
+        (tool for tool in c.tools().tools or [] if tool.get("name") == MULTI_ROUND_INPUT_TOOL), None
+    )
+    if tool is None:
+        c.skip(f"tools/list에 두 라운드 툴 {MULTI_ROUND_INPUT_TOOL}이 없음")
+    capabilities = {"elicitation": {}, **(c.options.capabilities or {})}
+    client = c.modern(capabilities=capabilities)
+    arguments = (
+        dict(c.options.args)
+        if c.options.args is not None and c.options.tool == MULTI_ROUND_INPUT_TOOL
+        else dict(MULTI_ROUND_INPUT_ARGS)
+    )
+    exchanges = client.call_tool(tool["name"], arguments, tool=tool, auto_input=True)
+    kinds = [exchange.result_type for exchange in exchanges]
+    expected = ["input_required", "input_required", "complete"]
+    c.check("라운드별 resultType", kinds == expected, repr(expected), repr(kinds))
+    for index, exchange in enumerate(exchanges[:3]):
+        c.expect_result(exchange, result_type=expected[index])
+    for previous, retry in zip(exchanges, exchanges[1:]):
+        asked = (previous.result or {}).get("inputRequests")
+        asked_keys = sorted(asked) if isinstance(asked, dict) else []
+        prev_body, retry_body = previous.request_json() or {}, retry.request_json() or {}
+        retry_params = retry_body.get("params") or {}
+        c.check(
+            f"{retry.label}: JSON-RPC id가 다름",
+            prev_body.get("id") != retry_body.get("id"),
+            "다른 id",
+            f"{prev_body.get('id')!r} -> {retry_body.get('id')!r}",
+        )
+        state = (previous.result or {}).get("requestState")
+        c.check(
+            f"{retry.label}: 직전 응답의 requestState를 그대로 되돌림",
+            retry_params.get("requestState") == state,
+            repr(state),
+            repr(retry_params.get("requestState")),
+        )
+        sent_keys = sorted(retry_params.get("inputResponses") or {})
+        c.check(
+            f"{retry.label}: 그 라운드의 inputResponses만 보냄",
+            sent_keys == asked_keys,
+            repr(asked_keys),
+            repr(sent_keys),
+        )
+        c.check(
+            f"{retry.label}: 원래 arguments 유지",
+            retry_params.get("arguments") == (prev_body.get("params") or {}).get("arguments"),
+            repr((prev_body.get("params") or {}).get("arguments")),
+            repr(retry_params.get("arguments")),
+        )
+    if len(exchanges) >= 2:
+        first_keys = sorted((exchanges[0].result or {}).get("inputRequests") or {})
+        second_keys = sorted((exchanges[1].result or {}).get("inputRequests") or {})
+        c.check(
+            "2차 라운드는 1차와 다른 입력을 물음",
+            bool(second_keys) and first_keys != second_keys,
+            f"{first_keys!r}와 다른 키",
+            repr(second_keys),
+        )
+    final = exchanges[-1].result or {}
+    c.check("최종 결과 isError", final.get("isError") is False, "False", repr(final.get("isError")))
     c.note(f"툴 {tool['name']}, 왕복 {len(exchanges) - 1}회")
 
 

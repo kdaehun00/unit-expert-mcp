@@ -1056,6 +1056,79 @@ class RequestPasteTest(UiCoreTestCase):
             with self.assertRaises(ValueError):
                 json.loads(text)
 
+    def test_the_retry_of_an_input_required_result(self) -> None:
+        meta = {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {}}}
+        sent = {
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {
+                "name": "convert_interactive", "arguments": {"value": 3, "from_unit": "km"}, "_meta": meta,
+                "inputResponses": {"target_unit": {"action": "accept", "content": {"to_unit": "m"}}},
+                "requestState": "old",
+            },
+        }
+
+        def ask(properties: dict[str, Any]) -> dict[str, Any]:
+            schema = {"type": "object", "properties": properties}
+            return {"method": "elicitation/create", "params": {"mode": "form", "requestedSchema": schema}}
+
+        result = {
+            "resultType": "input_required",
+            "requestState": "new",
+            "inputRequests": {
+                "precision": ask({"decimals": {"type": "integer", "minimum": 0, "maximum": 10}}),
+                "unit": ask({"to_unit": {"type": "string", "enum": ["cm", "m"]}}),
+                "mixed": ask({
+                    "ok": {"type": "boolean"}, "name": {"type": "string"}, "low": {"type": "integer", "minimum": 5},
+                    "high": {"type": "number", "maximum": 0.5}, "preset": {"type": "integer", "default": 7},
+                }),
+                "roots": {"method": "roots/list"},
+                "other": {"method": "x/unknown"},
+            },
+        }
+        bundle = self.call("continueRequest", "/mcp?cfg=abc", sent, result)
+        self.assertEqual(
+            {key: bundle[key] for key in ("url", "mode", "method", "tool", "args", "id")},
+            {
+                "url": "/mcp?cfg=abc", "mode": "2026", "method": "tools/call", "tool": "convert_interactive",
+                "args": {"value": 3, "from_unit": "km"}, "id": 5,
+            },
+        )
+        # The state as received, answers for this result's keys only, the rest of params kept.
+        self.assertEqual(bundle["params"]["requestState"], "new")
+        self.assertEqual(bundle["params"]["_meta"], meta)
+        self.assertEqual(
+            bundle["params"]["inputResponses"],
+            {
+                "precision": {"action": "accept", "content": {"decimals": 1}},
+                "unit": {"action": "accept", "content": {"to_unit": "cm"}},
+                "mixed": {
+                    "action": "accept",
+                    "content": {"ok": True, "name": "", "low": 5, "high": 0.5, "preset": 7},
+                },
+                "roots": {"roots": []},
+                "other": {},
+            },
+        )
+        # It is a bundle the paste box reads, and the draft carries the capability on.
+        draft = self.draft(bundle)
+        self.assertEqual(draft["body"]["id"], 5)
+        self.assertEqual(draft["body"]["params"]["requestState"], "new")
+        self.assertEqual(draft["body"]["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"], {"elicitation": {}})
+        self.assertEqual(draft["headers"]["Mcp-Name"], "convert_interactive")
+
+        only_state = self.call("continueRequest", "", {**sent, "id": "call-1"}, {"resultType": "input_required", "requestState": "s"})
+        self.assertEqual(only_state["id"], "call-1-next")
+        self.assertNotIn("url", only_state)
+        self.assertNotIn("inputResponses", only_state["params"])
+        for body, answer in (
+            (sent, {"resultType": "complete", "content": []}),
+            (sent, None),
+            ({**sent, "method": "tools/list"}, result),
+            (None, result),
+            ({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}}, result),
+        ):
+            self.assertIsNone(self.call("continueRequest", "/mcp", body, answer))
+
     def draft(self, bundle: dict[str, Any], options: dict[str, Any] | None = None) -> dict[str, Any]:
         request = self.parse(json.dumps(bundle))["request"]
         return self.call("buildRequestDraft", request, options or {"clientName": "t"})

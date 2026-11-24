@@ -42,7 +42,7 @@ Content-Type: application/json
 - `convert_area`
 - `convert_volume`
 - `list_supported_units`
-- `echo_header_params`, `confirm_action` (2026-07-28 경로 전용 테스트 툴. 아래 "2026-07-28 지원 범위" 참고)
+- `echo_header_params`, `confirm_action`, `convert_interactive` (2026-07-28 경로 전용 테스트 툴. 아래 "2026-07-28 지원 범위" 참고)
 
 ## Scenario Control
 
@@ -77,6 +77,7 @@ MCP 주소로 요청 하나를 만들어 보내고 응답을 봅니다. 서버 �
   2. 요청 JSON: `{"url", "mode", "method", "tool", "args", "params", "id", "headers", "omit", "body"}`. `method`만 필수입니다. `mode`는 `"2026"`(기본) 또는 `"2025"`, `omit`은 일부러 뺄 것(`meta-version`, `capabilities`, `meta`, `version-header`, `method-header`, `name-header`. 테스트 클라이언트 `call`의 `--omit-*`와 같은 이름)입니다.
   3. curl 명령(URL, `-X`, `-H`, `-d`). 이 화면들이 만든 curl은 그대로 다시 읽습니다.
 - "요청 JSON 형식"은 2번 형식의 설명과 예 2개를 복사합니다(AI에게 주고 요청을 만들게 할 때). "지금 요청을 JSON으로", "지금 요청을 curl로"는 현재 폼을 내보냅니다.
+- 이어서 보내기: `tools/call`의 응답이 `input_required`면 응답 아래에 버튼이 나옵니다. 누르면 받은 `requestState`와, `inputRequests`의 `requestedSchema`를 보고 기본값을 채운 `inputResponses`가 들어간 다음 요청(2번 형식)으로 붙여 넣기 칸과 폼을 채웁니다. 전송은 "보내기"를 눌러야 됩니다. 예시의 "입력 요청 왕복"은 `elicitation` capability를 선언한 `convert_interactive` 호출입니다.
 - 캐시 확인: 응답의 `ttlMs` 동안 같은 `tools/list`를 다시 보내지 않는 클라이언트를 흉내 냅니다.
 
 요청 하나에만 시나리오를 넣으려면 `X-MCP-Test-Scenario` 헤더를 씁니다. 헤더가 없으면 `cfg` 토큰, 그것도 없으면 서버 전역 설정이 적용됩니다.
@@ -163,7 +164,7 @@ X-MCP-Test-Scenario: duplicate-tool-name
 - 요청 검증: `MCP-Protocol-Version`·`Mcp-Method`·`Mcp-Name` 헤더, `_meta`의 protocolVersion·clientCapabilities, 헤더와 바디의 일치, `=?base64?...?=` 디코드, `Mcp-Param-*`.
 - 에러 코드: `-32020`(헤더 불일치), `-32021`(capability 누락, `data.requiredCapabilities`), `-32022`(버전 미지원, `data.supported`·`data.requested`).
 - 결과: 모든 결과에 `resultType`과 `_meta` serverInfo, `server/discover`와 `tools/list`에 `ttlMs`·`cacheScope`, `tools/list` 페이지네이션.
-- 테스트 툴: `echo_header_params`(`x-mcp-header`가 달린 인자), `confirm_action`(`input_required` 왕복). 모던 `tools/list`에만 나옵니다.
+- 테스트 툴: `echo_header_params`(`x-mcp-header`가 달린 인자), `confirm_action`(`input_required` 왕복 1회), `convert_interactive`(`input_required` 왕복 2회: 1차 호출은 바꿀 단위를, 2차는 소수 자릿수를 묻고 3차에 변환 결과를 줍니다). 모던 `tools/list`에만 나옵니다.
 
 ### strict2026 기본 동작 변경
 
@@ -295,7 +296,7 @@ PYTHONPATH=src .venv/bin/python -m unit_expert_mcp.client probe --url http://loc
 
 `--expect server`에서는 시나리오가 기본값으로 꺼져 있는 서버 옵션(`session.validate`, `auth.enforceScope`, `toolsList.pageSize`)을 `?cfg=`로 켜서 실행합니다. 서버 기본 동작 그대로 보려면 `--no-inject`를 줍니다. 대상이 `?cfg=`를 받지 않는 서버면 주입 없이 실행하고 `injection` 그룹은 건너뜁니다.
 
-테스트 툴은 `tools/list`에서 찾습니다. `echo_header_params`와 `confirm_action`이 있으면 그 툴을 쓰고, 없으면 `x-mcp-header`가 달린 툴과 이름·설명으로 찾은 툴을 씁니다. `--header-tool`, `--input-tool`, `--tool`로 지정할 수 있습니다.
+테스트 툴은 `tools/list`에서 찾습니다. `echo_header_params`와 `confirm_action`이 있으면 그 툴을 쓰고, 없으면 `x-mcp-header`가 달린 툴과 이름·설명으로 찾은 툴을 씁니다. `--header-tool`, `--input-tool`, `--tool`로 지정할 수 있습니다. `input-required-multi-round`는 `convert_interactive`가 있을 때만 실행하고(없으면 SKIP) 1차·2차 `input_required`, 3차 `complete`를 확인합니다. `call --auto-input`은 `input_required`가 이어지는 동안(최대 5회) 직전 응답의 `requestState`와 `requestedSchema`에 맞춘 값(enum은 첫 값, 숫자는 minimum·maximum 안의 값)으로 재요청합니다. `call`은 `clientCapabilities`를 기본 `{}`로 보내므로 `elicitation`을 요구하는 툴에는 `--capabilities '{"elicitation":{}}'`를 함께 줍니다.
 
 ```bash
 # 로컬 서버의 세 세대를 차례로 검사

@@ -385,6 +385,20 @@ def parse_www_authenticate(value: str | None) -> dict[str, Any]:
 
 
 # -- sample data ----------------------------------------------------------------------
+def _within_bounds(schema: dict[str, Any], value: int) -> Any:
+    """``value`` moved into the schema's minimum/maximum when it lies outside."""
+
+    def number(bound: Any) -> bool:
+        return isinstance(bound, (int, float)) and not isinstance(bound, bool)
+
+    low, high = schema.get("minimum"), schema.get("maximum")
+    if number(high) and value > high:
+        return high
+    if number(low) and value < low:
+        return low
+    return value
+
+
 def sample_value(schema: Any, hint: str = "") -> Any:
     """A plausible value for a JSON Schema property (used to call unknown test tools)."""
     if not isinstance(schema, dict):
@@ -397,9 +411,9 @@ def sample_value(schema: Any, hint: str = "") -> Any:
         return schema["default"]
     kind = _schema_type(schema)
     if kind == "integer":
-        return 42
+        return _within_bounds(schema, 42)
     if kind == "number":
-        return 1
+        return _within_bounds(schema, 1)
     if kind == "boolean":
         return True
     if kind == "array":

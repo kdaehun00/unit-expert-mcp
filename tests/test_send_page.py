@@ -179,6 +179,7 @@ function snapshot() {
   out.rawOpen = el("rawBox").open;
   out.inspectLink = el("inspectLink").href;
   out.inspectLinkHidden = el("inspectLink").hidden;
+  out.continueHidden = el("continueRow").hidden;
   out.chips = el("urlChips").children.map((chip) => chip.textContent);
   out.cache = el("clientCacheEnabled").checked;
   return out;
@@ -380,6 +381,73 @@ class SendPageScriptTest(unittest.TestCase):
         self.assertEqual(sent["callNote"], "에러 응답입니다: -32603 boom")
         self.assertEqual(json.loads(sent["lastResponse"])["error"]["message"], "boom")
         self.assertEqual(sent["inspectLink"], "/inspect?plain=1&screen=1")
+
+    def test_input_required_is_continued_round_by_round(self) -> None:
+        from mcp_test_support import modern_call
+        from unit_expert_mcp.server import handle_json_rpc
+
+        def real(**params: Any) -> dict[str, Any]:
+            payload, headers = modern_call(
+                "convert_interactive", {"value": 3, "from_unit": "km"}, capabilities={"elicitation": {}}, **params
+            )
+            status, _, body = handle_json_rpc(payload, headers=headers)
+            self.assertEqual(status, 200)
+            return body
+
+        first = real()
+        second = real(
+            inputResponses={"target_unit": {"action": "accept", "content": {"to_unit": "mm"}}},
+            requestState=first["result"]["requestState"],
+        )
+        done = {"jsonrpc": "2.0", "id": 3, "result": {"resultType": "complete", "content": [], "isError": False}}
+        result = self.run_plan(
+            [
+                {"snapshot": "start"},
+                {"set": ["preset", "input-required", "change"]},
+                {"click": "sendBtn"}, {"snapshot": "asked1"},
+                {"click": "continueBtn"}, {"snapshot": "filled1"},
+                {"click": "sendBtn"}, {"snapshot": "asked2"},
+                {"click": "continueBtn"},
+                {"click": "sendBtn"}, {"snapshot": "done"},
+            ],
+            answers=[{"status": 200, "body": body} for body in (first, second, done)],
+        )
+        self.assertTrue(result["start"]["continueHidden"])
+        self.assertFalse(result["asked1"]["continueHidden"])
+        # Filling the form sends nothing and takes the offer away until the next answer.
+        filled = result["filled1"]
+        self.assertEqual(len(filled["sent"]), 1)
+        self.assertTrue(filled["continueHidden"])
+        self.assertEqual(filled["pasteStatus"], "요청 JSON을 읽어 아래 칸을 채웠습니다.")
+        self.assertEqual((filled["cMethod"], filled["cTool"]), ("tools/call", "convert_interactive"))
+        self.assertEqual(json.loads(filled["cArgs"]), {"value": 3, "from_unit": "km"})
+        self.assertFalse(result["asked2"]["continueHidden"])
+        self.assertTrue(result["done"]["continueHidden"])
+
+        one, two, three = (entry["body"] for entry in result["done"]["sent"])
+        self.assertEqual(len({one["id"], two["id"], three["id"]}), 3)
+        self.assertNotIn("requestState", one["params"])
+        self.assertEqual(two["params"]["requestState"], first["result"]["requestState"])
+        self.assertEqual(
+            two["params"]["inputResponses"], {"target_unit": {"action": "accept", "content": {"to_unit": "mm"}}}
+        )
+        self.assertEqual(three["params"]["requestState"], second["result"]["requestState"])
+        self.assertEqual(
+            three["params"]["inputResponses"], {"precision": {"action": "accept", "content": {"decimals": 1}}}
+        )
+        for body in (one, two, three):
+            self.assertEqual(body["params"]["arguments"], {"value": 3, "from_unit": "km"})
+            self.assertEqual(body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"], {"elicitation": {}})
+        # The real server takes the requests the page made as they are.
+        for entry, kind in zip(result["done"]["sent"], ("input_required", "input_required", "complete")):
+            headers = {name: value for name, value in entry["headers"].items()}
+            status, _, body = handle_json_rpc(entry["body"], headers=headers)
+            self.assertEqual((status, body["result"]["resultType"]), (200, kind), body)
+        self.assertEqual(body["result"]["content"][0]["text"], "3 km = 3000000.0 mm")
+
+    def test_a_complete_or_legacy_answer_offers_no_continuation(self) -> None:
+        sent = self.run_plan([{"click": "sendBtn"}, {"snapshot": "sent"}])["sent"]
+        self.assertTrue(sent["continueHidden"])
 
     def test_the_cache_example_does_not_send_twice(self) -> None:
         answers = [{"status": 200, "body": {"jsonrpc": "2.0", "id": 1, "result": {"tools": [], "ttlMs": 60000}}}]

@@ -194,8 +194,9 @@ class ServerEraDispatchTest(unittest.TestCase):
         assert payload is not None
         self.assertEqual(payload["result"]["resultType"], "complete")
         self.assertIn(META_SERVER, payload["result"]["_meta"])
-        # 6 converters + the 2 modern-only test tools (echo_header_params, confirm_action).
-        self.assertEqual(len(payload["result"]["tools"]), 8)
+        # 6 converters + the 3 modern-only test tools (echo_header_params, confirm_action,
+        # convert_interactive).
+        self.assertEqual(len(payload["result"]["tools"]), 9)
 
     def test_both_serves_legacy_initialize_and_tools_list(self) -> None:
         status, headers, payload = self.call("both", legacy_initialize())

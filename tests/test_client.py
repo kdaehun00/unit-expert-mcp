@@ -72,7 +72,26 @@ TOOLS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "convert_interactive",
+        "description": "Asks for the target unit, then for the decimals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"value": {"type": "number"}, "from_unit": {"type": "string"}},
+            "required": ["value", "from_unit"],
+        },
+    },
 ]
+# Round -> (inputRequests key, requestedSchema property, state the retry must carry).
+INTERACTIVE_ROUNDS = {
+    None: ("target_unit", "to_unit", {"type": "string", "enum": ["m", "cm"]}, "unit-state"),
+    "unit-state": (
+        "precision",
+        "decimals",
+        {"type": "integer", "minimum": 0, "maximum": 10},
+        "precision-state",
+    ),
+}
 
 
 class Recorded:
@@ -276,6 +295,40 @@ class SpecServer:
                 "resultType": "input_required",
                 "inputRequests": {"confirm": ask},
                 "requestState": "state-1",
+            }
+            return as_json(200, {"jsonrpc": "2.0", "id": request.json()["id"], "result": body})
+        if name == "convert_interactive":
+            state = params.get("requestState")
+            if state == "precision-state":
+                answer = (params.get("inputResponses") or {}).get("precision") or {}
+                decimals = (answer.get("content") or {}).get("decimals")
+                if list(params["inputResponses"]) != ["precision"] or not 0 <= decimals <= 10:
+                    return reject(-32602, "Bad inputResponses")
+                text = f"3 km = {3000:.{decimals}f} m"
+                return complete({"content": [{"type": "text", "text": text}], "isError": False})
+            if state not in INTERACTIVE_ROUNDS:
+                return reject(-32602, "Bad requestState")
+            if state == "unit-state":
+                answer = (params.get("inputResponses") or {}).get("target_unit") or {}
+                if (answer.get("content") or {}).get("to_unit") != "m":
+                    return reject(-32602, "Bad inputResponses")
+            key, field, schema, next_state = INTERACTIVE_ROUNDS[state]
+            ask = {
+                "method": "elicitation/create",
+                "params": {
+                    "mode": "form",
+                    "message": "?",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {field: schema},
+                        "required": [field],
+                    },
+                },
+            }
+            body = {
+                "resultType": "input_required",
+                "inputRequests": {key: ask},
+                "requestState": next_state,
             }
             return as_json(200, {"jsonrpc": "2.0", "id": request.json()["id"], "result": body})
         if name == "confirm_action":
@@ -711,6 +764,67 @@ class ModernClientTest(ServerCase):
         self.assertEqual(retry["params"]["arguments"], first["params"]["arguments"])
         self.assertEqual(retry["params"]["_meta"][p.META_CLIENT_CAPABILITIES], {"elicitation": {}})
 
+    def test_input_required_over_several_rounds(self) -> None:
+        server, target = self.fake()
+        client = ModernClient(target, capabilities={"elicitation": {}})
+        before = len(server.requests)
+        exchanges = client.call_tool(
+            "convert_interactive", {"value": 3, "from_unit": "km"}, tool=TOOLS[3], auto_input=True
+        )
+        self.assertEqual(
+            [exchange.result_type for exchange in exchanges],
+            ["input_required", "input_required", "complete"],
+        )
+        first, second, third = (request.json() for request in server.requests[before:])
+        self.assertEqual(len({first["id"], second["id"], third["id"]}), 3)
+        self.assertNotIn("requestState", first["params"])
+        # Each retry: the state of the response before it and that round's answers only.
+        self.assertEqual(second["params"]["requestState"], "unit-state")
+        self.assertEqual(
+            second["params"]["inputResponses"],
+            {"target_unit": {"action": "accept", "content": {"to_unit": "m"}}},
+        )
+        self.assertEqual(third["params"]["requestState"], "precision-state")
+        self.assertEqual(
+            third["params"]["inputResponses"],
+            {"precision": {"action": "accept", "content": {"decimals": 10}}},
+        )
+        for retry in (second, third):
+            self.assertEqual(retry["params"]["arguments"], first["params"]["arguments"])
+        self.assertEqual(exchanges[-1].result["content"][0]["text"], "3 km = 3000.0000000000 m")
+
+    def test_sample_values_follow_enum_and_bounds(self) -> None:
+        cases = (
+            ({"type": "string", "enum": ["m", "cm"]}, "m"),
+            ({"type": "integer", "minimum": 0, "maximum": 10}, 10),
+            ({"type": "integer", "minimum": 100}, 100),
+            ({"type": "integer", "minimum": 0, "maximum": 100}, 42),
+            ({"type": "integer"}, 42),
+            ({"type": "integer", "maximum": True}, 42),
+            ({"type": "number", "minimum": 5}, 5),
+            ({"type": "number", "maximum": 0.5}, 0.5),
+            ({"type": "number"}, 1),
+        )
+        for schema, expected in cases:
+            with self.subTest(schema=schema):
+                self.assertEqual(p.sample_value(schema), expected)
+
+    def test_auto_input_stops_after_max_rounds(self) -> None:
+        def responder(request: Recorded):
+            body = {
+                "resultType": "input_required",
+                "inputRequests": {},
+                "requestState": f"state-{request.json()['id']}",
+            }
+            return as_json(200, {"jsonrpc": "2.0", "id": request.json()["id"], "result": body})
+
+        server, target = self.fake(responder=responder)
+        exchanges = ModernClient(target).call_tool("loop", {}, tool=None, auto_input=True, max_rounds=3)
+        self.assertEqual(len(exchanges), 4)
+        states = [request.json()["params"].get("requestState") for request in server.requests[-4:]]
+        self.assertEqual(states[0], None)
+        self.assertEqual(states[1:], [exchange.result["requestState"] for exchange in exchanges[:3]])
+
     def test_without_auto_input_the_first_result_is_returned(self) -> None:
         _, target = self.fake()
         exchanges = ModernClient(target).call_tool("confirm_action", {"action": "x"}, tool=TOOLS[2])
@@ -1007,6 +1121,7 @@ class RunnerTest(ServerCase):
         skipped = sorted(name for name, result in results.items() if result.status == SKIP)
         self.assertEqual(skipped, ["delete-405", "get-405", "subscriptions-listen"])
         self.assertEqual(results["input-required-roundtrip"].status, PASS)
+        self.assertEqual(results["input-required-multi-round"].status, PASS)
         self.assertEqual(results["param-header-ok"].status, PASS)
         self.assertEqual(results["legacy-session-expire-reconnect"].status, PASS)
 
@@ -1153,6 +1268,19 @@ class RunnerTest(ServerCase):
             ["param-header-ok", "input-required-roundtrip"], {"modern": {"testTools": False}}
         )
         self.assertEqual({r.status for r in hidden.values()}, {SKIP})
+
+    def test_multi_round_scenario_on_the_real_server(self) -> None:
+        result = self.run_real(["input-required-multi-round"])["input-required-multi-round"]
+        self.assertEqual(result.status, PASS, self.describe({"multi": result}))
+        self.assertEqual(
+            [exchange.result_type for exchange in result.exchanges if exchange.label.startswith("tools/call")],
+            ["input_required", "input_required", "complete"],
+        )
+        hidden = self.run_real(["input-required-multi-round"], {"modern": {"testTools": False}})
+        self.assertEqual(hidden["input-required-multi-round"].status, SKIP)
+        gateway = self.run_real(["input-required-multi-round"], profile="gateway", assume_era="dual")
+        self.assertEqual(gateway["input-required-multi-round"].status, SKIP)
+        self.assertIn("미확정", gateway["input-required-multi-round"].reason)
 
     def test_version_header_mismatch_is_a_header_mismatch_on_the_real_server(self) -> None:
         for era in ("both", "modern"):

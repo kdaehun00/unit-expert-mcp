@@ -73,6 +73,12 @@ X_MCP_HEADER = "x-mcp-header"
 HEADER_PARAMS_TOOL = "echo_header_params"
 MRTR_TOOL = "confirm_action"
 MRTR_INPUT_KEY = "confirm"
+# Two-round MRTR tool: asks for the target unit, then for the number of decimals.
+INTERACTIVE_TOOL = "convert_interactive"
+INTERACTIVE_UNIT_KEY = "target_unit"
+INTERACTIVE_PRECISION_KEY = "precision"
+INTERACTIVE_MAX_DECIMALS = 10
+MODERN_TEST_TOOL_NAMES = (HEADER_PARAMS_TOOL, MRTR_TOOL, INTERACTIVE_TOOL)
 MRTR_STATE_TTL_SECONDS = 600
 # method -> params key mirrored into the Mcp-Name header.
 NAME_BEARING_METHODS = {
@@ -908,8 +914,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     # Modern (2026-07-28) path options.
     "modern": {
-        # Expose the modern-only test tools (echo_header_params, confirm_action)
-        # in tools/list. They are never listed on the legacy path.
+        # Expose the modern-only test tools (echo_header_params, confirm_action,
+        # convert_interactive) in tools/list. They are never listed on the legacy path.
         "testTools": True,
         # Capabilities every modern request except server/discover must declare
         # in _meta clientCapabilities, else 400 + -32021.
@@ -1284,6 +1290,24 @@ def modern_test_tools(service_name: str = SERVICE_NAME) -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
             "annotations": annotations("Confirm Action"),
+        },
+        {
+            "name": INTERACTIVE_TOOL,
+            "description": (
+                f"{service_name} interactive unit conversion over the input_required flow. "
+                "Call 1 asks for the target unit, call 2 asks for the number of decimals, "
+                "call 3 returns the converted value."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "number", "description": "Numeric value to convert."},
+                    "from_unit": {"type": "string", "description": "Source unit."},
+                },
+                "required": ["value", "from_unit"],
+                "additionalProperties": False,
+            },
+            "annotations": annotations("Convert Interactive"),
         },
     ]
 
@@ -2741,40 +2765,128 @@ def _request_state_digest(arguments: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
-def issue_request_state(tool_name: str, arguments: dict[str, Any]) -> str:
-    """Opaque, HMAC-protected requestState bound to the tool, its arguments and a TTL."""
-    payload = {
+def issue_request_state(
+    tool_name: str, arguments: dict[str, Any], data: dict[str, Any] | None = None
+) -> str:
+    """Opaque, HMAC-protected requestState bound to the tool, its arguments and a TTL.
+
+    ``data`` carries what earlier rounds collected, so a retry only needs the
+    latest requestState and that round's inputResponses.
+    """
+    payload: dict[str, Any] = {
         "tool": tool_name,
         "args": _request_state_digest(arguments),
         "exp": int(time.time()) + MRTR_STATE_TTL_SECONDS,
     }
+    if data:
+        payload["data"] = data
     body = _b64url_encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     signature = hmac.new(JWT_SECRET.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
     return f"{body}.{_b64url_encode(signature)}"
 
 
-def verify_request_state(state: Any, tool_name: str, arguments: dict[str, Any]) -> bool:
+def read_request_state(
+    state: Any, tool_name: str, arguments: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The ``data`` of a valid requestState ({} when it has none), else None."""
     if not isinstance(state, str) or state.count(".") != 1:
-        return False
+        return None
     body, signature = state.split(".")
     try:
         expected = hmac.new(
             JWT_SECRET.encode("utf-8"), body.encode("ascii"), hashlib.sha256
         ).digest()
         if not hmac.compare_digest(expected, _b64url_decode(signature)):
-            return False
+            return None
         payload = json.loads(_b64url_decode(body).decode("utf-8"))
     except (binascii.Error, ValueError, UnicodeError):
-        return False
+        return None
     if not isinstance(payload, dict):
-        return False
+        return None
     exp = payload.get("exp")
-    return (
-        payload.get("tool") == tool_name
-        and payload.get("args") == _request_state_digest(arguments)
-        and isinstance(exp, int)
-        and exp >= int(time.time())
+    data = payload.get("data", {})
+    if (
+        payload.get("tool") != tool_name
+        or payload.get("args") != _request_state_digest(arguments)
+        or not isinstance(exp, int)
+        or exp < int(time.time())
+        or not isinstance(data, dict)
+    ):
+        return None
+    return data
+
+
+def verify_request_state(state: Any, tool_name: str, arguments: dict[str, Any]) -> bool:
+    return read_request_state(state, tool_name, arguments) is not None
+
+
+def _missing_elicitation_reply(
+    request_id: Any, tool_name: str, meta: dict[str, Any]
+) -> dict[str, Any] | None:
+    """400 + -32021 when the client did not declare ``elicitation``.
+
+    The tool cannot run without elicitation, and an elicitation/create input
+    request MUST NOT be sent to a client that did not declare the capability.
+    """
+    capabilities = meta.get(META_CLIENT_CAPABILITIES)
+    if isinstance(capabilities, dict) and isinstance(capabilities.get("elicitation"), dict):
+        return None
+    return _reply(
+        400,
+        json_rpc_error(
+            request_id,
+            ERR_MISSING_CAPABILITY,
+            f"Tool '{tool_name}' requires the client capability 'elicitation'",
+            {"requiredCapabilities": {"elicitation": {}}},
+        ),
     )
+
+
+def _mrtr_complete_reply(
+    request_id: Any, config: dict[str, Any], text: str, is_error: bool = False
+) -> dict[str, Any]:
+    result = tool_error(text) if is_error else {"content": [{"type": "text", "text": text}], "isError": False}
+    return _reply(200, json_rpc_result_2026(request_id, result, config))
+
+
+def _mrtr_input_required_reply(
+    request_id: Any,
+    config: dict[str, Any],
+    key: str,
+    message: str,
+    properties: dict[str, Any],
+    request_state: str,
+) -> dict[str, Any]:
+    """InputRequiredResult with one form-mode elicitation/create request under ``key``."""
+    result = {
+        "resultType": "input_required",
+        "inputRequests": {
+            key: {
+                "method": "elicitation/create",
+                "params": {
+                    "mode": "form",
+                    "message": message,
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": list(properties),
+                    },
+                },
+            }
+        },
+        "requestState": request_state,
+    }
+    return _reply(200, json_rpc_result_2026(request_id, result, config))
+
+
+def _mrtr_answer(params: dict[str, Any], key: str) -> tuple[str | None, Any]:
+    """(action, content) of ``inputResponses[key]``; (None, None) when it is absent."""
+    responses = params.get("inputResponses")
+    answer = responses.get(key) if isinstance(responses, dict) else None
+    if not isinstance(answer, dict):
+        return None, None
+    action = answer.get("action")
+    return (action if isinstance(action, str) else None), answer.get("content")
 
 
 def confirm_action_reply(
@@ -2787,35 +2899,19 @@ def confirm_action_reply(
     """tools/call for the MRTR test tool (spec: basic/patterns/mrtr)."""
     action = arguments.get("action")
     if not isinstance(action, str) or not action.strip():
-        return _reply(
-            200,
-            json_rpc_result_2026(request_id, tool_error("action must be a non-empty string."), config),
-        )
+        return _mrtr_complete_reply(request_id, config, "action must be a non-empty string.", True)
 
-    # The tool cannot run without elicitation, and an elicitation/create input
-    # request MUST NOT be sent to a client that did not declare the capability.
-    capabilities = meta.get(META_CLIENT_CAPABILITIES)
-    if not isinstance(capabilities, dict) or not isinstance(capabilities.get("elicitation"), dict):
-        return _reply(
-            400,
-            json_rpc_error(
-                request_id,
-                ERR_MISSING_CAPABILITY,
-                f"Tool '{MRTR_TOOL}' requires the client capability 'elicitation'",
-                {"requiredCapabilities": {"elicitation": {}}},
-            ),
-        )
+    missing = _missing_elicitation_reply(request_id, MRTR_TOOL, meta)
+    if missing is not None:
+        return missing
 
     state = params.get("requestState")
     if state is not None:
         if not verify_request_state(state, MRTR_TOOL, arguments):
             return _invalid_params_reply(request_id, config, "Invalid or expired requestState")
-        responses = params.get("inputResponses")
-        answer = responses.get(MRTR_INPUT_KEY) if isinstance(responses, dict) else None
-        decision = answer.get("action") if isinstance(answer, dict) else None
+        decision, content = _mrtr_answer(params, MRTR_INPUT_KEY)
         text = None
         if decision == "accept":
-            content = answer.get("content")
             if isinstance(content, dict) and isinstance(content.get("confirmed"), bool):
                 text = (
                     f"Action '{action}' confirmed."
@@ -2827,40 +2923,134 @@ def confirm_action_reply(
         elif decision == "cancel":
             text = f"Action '{action}' was cancelled."
         if text is not None:
-            return _reply(
-                200,
-                json_rpc_result_2026(
-                    request_id,
-                    {"content": [{"type": "text", "text": text}], "isError": False},
-                    config,
-                ),
-            )
+            return _mrtr_complete_reply(request_id, config, text)
         # Missing or incomplete answer: ask again instead of failing (SHOULD).
 
-    result = {
-        "resultType": "input_required",
-        "inputRequests": {
-            MRTR_INPUT_KEY: {
-                "method": "elicitation/create",
-                "params": {
-                    "mode": "form",
-                    "message": f"Confirm the action '{action}'?",
-                    "requestedSchema": {
-                        "type": "object",
-                        "properties": {
-                            "confirmed": {
-                                "type": "boolean",
-                                "description": "true to run the action",
-                            }
-                        },
-                        "required": ["confirmed"],
-                    },
-                },
+    return _mrtr_input_required_reply(
+        request_id,
+        config,
+        MRTR_INPUT_KEY,
+        f"Confirm the action '{action}'?",
+        {"confirmed": {"type": "boolean", "description": "true to run the action"}},
+        issue_request_state(MRTR_TOOL, arguments),
+    )
+
+
+def unit_category(unit: str) -> str | None:
+    return next(
+        (category for category, units in SUPPORTED_UNITS.items() if unit in units), None
+    )
+
+
+def convert_units(value: float, from_unit: str, to_unit: str, category: str) -> float:
+    if category == "temperature":
+        return celsius_to_temperature(temperature_to_celsius(value, from_unit), to_unit)
+    factors = {
+        "length": LENGTH_FACTORS,
+        "weight": WEIGHT_FACTORS,
+        "area": AREA_FACTORS,
+        "volume": VOLUME_FACTORS,
+    }[category]
+    return value * factors[from_unit] / factors[to_unit]
+
+
+def convert_interactive_reply(
+    request_id: Any,
+    params: dict[str, Any],
+    arguments: dict[str, Any],
+    meta: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """tools/call for the two-round MRTR tool.
+
+    Round 1 asks for the target unit, round 2 for the number of decimals; the
+    chosen unit travels in the round-2 requestState, so every retry needs only
+    the latest requestState and that round's inputResponses.
+    """
+    try:
+        value = validate_value(arguments.get("value"))
+        from_unit = normalize_unit(arguments.get("from_unit"))
+        category = unit_category(from_unit)
+        if category is None:
+            supported = ", ".join(unit for units in SUPPORTED_UNITS.values() for unit in units)
+            raise ValueError(f"unsupported unit '{from_unit}'. Supported units: {supported}.")
+    except ValueError as error:
+        return _mrtr_complete_reply(request_id, config, str(error), True)
+
+    missing = _missing_elicitation_reply(request_id, INTERACTIVE_TOOL, meta)
+    if missing is not None:
+        return missing
+
+    source = f"{format_number(value)} {from_unit}"
+    targets = [unit for unit in SUPPORTED_UNITS[category] if unit != from_unit]
+    to_unit: str | None = None
+    problem: str | None = None
+
+    state = params.get("requestState")
+    if state is not None:
+        data = read_request_state(state, INTERACTIVE_TOOL, arguments)
+        if data is None or data.get("to_unit", targets[0]) not in targets:
+            return _invalid_params_reply(request_id, config, "Invalid or expired requestState")
+        to_unit = data.get("to_unit")
+        key = INTERACTIVE_UNIT_KEY if to_unit is None else INTERACTIVE_PRECISION_KEY
+        decision, content = _mrtr_answer(params, key)
+        if decision in ("decline", "cancel"):
+            word = "declined" if decision == "decline" else "cancelled"
+            return _mrtr_complete_reply(
+                request_id, config, f"Conversion of {source} was {word}; nothing was converted."
+            )
+        answer = content if decision == "accept" and isinstance(content, dict) else {}
+        if decision is None:
+            problem = f"inputResponses.{key} with action accept, decline or cancel is required."
+        elif decision != "accept":
+            problem = f"inputResponses.{key}.action must be accept, decline or cancel."
+        elif to_unit is None:
+            chosen = answer.get("to_unit")
+            if isinstance(chosen, str) and chosen in targets:
+                to_unit = chosen  # round 1 answered: go on to round 2
+            else:
+                problem = f"to_unit must be one of: {', '.join(targets)}."
+        else:
+            decimals = answer.get("decimals")
+            if isinstance(decimals, float) and decimals.is_integer():
+                decimals = int(decimals)
+            if (
+                isinstance(decimals, int)
+                and not isinstance(decimals, bool)
+                and 0 <= decimals <= INTERACTIVE_MAX_DECIMALS
+            ):
+                output = convert_units(value, from_unit, to_unit, category)
+                return _mrtr_complete_reply(
+                    request_id, config, f"{source} = {output:.{decimals}f} {to_unit}"
+                )
+            problem = f"decimals must be an integer from 0 to {INTERACTIVE_MAX_DECIMALS}."
+        # Missing or incomplete answer: ask the same round again instead of failing (SHOULD).
+
+    note = f"\nThe previous answer was not accepted: {problem}" if problem else ""
+    if to_unit is None:
+        return _mrtr_input_required_reply(
+            request_id,
+            config,
+            INTERACTIVE_UNIT_KEY,
+            f"Convert {source} to which unit?{note}",
+            {"to_unit": {"type": "string", "enum": targets, "description": f"Target {category} unit."}},
+            issue_request_state(INTERACTIVE_TOOL, arguments),
+        )
+    return _mrtr_input_required_reply(
+        request_id,
+        config,
+        INTERACTIVE_PRECISION_KEY,
+        f"Convert {source} to {to_unit} with how many decimal places?{note}",
+        {
+            "decimals": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": INTERACTIVE_MAX_DECIMALS,
+                "description": "Digits after the decimal point.",
             }
         },
-        "requestState": issue_request_state(MRTR_TOOL, arguments),
-    }
-    return _reply(200, json_rpc_result_2026(request_id, result, config))
+        issue_request_state(INTERACTIVE_TOOL, arguments, {"to_unit": to_unit}),
+    )
 
 
 def echo_header_params_result(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3234,7 +3424,7 @@ def modern_tools_call_reply(
     if tool is None:
         # Protocol error, not a tool execution error (spec: server/tools#error-handling).
         reply = _invalid_params_reply(request_id, config, f"Unknown tool: {name}")
-        if name in (HEADER_PARAMS_TOOL, MRTR_TOOL):
+        if name in MODERN_TEST_TOOL_NAMES:
             reply["injected"] = config_label(config, "modern.testTools") + reply["injected"]
         return reply
     arguments = params.get("arguments")
@@ -3260,8 +3450,9 @@ def modern_tools_call_reply(
     ):
         labels = config_label(config, "modern.rejectUnexpectedParamHeader")
 
-    if name == MRTR_TOOL:
-        reply = confirm_action_reply(request_id, params, arguments, request_meta(payload), config)
+    if name in (MRTR_TOOL, INTERACTIVE_TOOL):
+        handler = confirm_action_reply if name == MRTR_TOOL else convert_interactive_reply
+        reply = handler(request_id, params, arguments, request_meta(payload), config)
         reply["injected"] = labels + reply["injected"]
         return reply
     if name == HEADER_PARAMS_TOOL:
@@ -5312,6 +5503,7 @@ SEND_TOOL_EXAMPLES: dict[str, dict[str, Any]] = {
     "list_supported_units": {},
     HEADER_PARAMS_TOOL: {"region": "kr", "greeting": "hello", "count": 3},
     MRTR_TOOL: {"action": "delete"},
+    INTERACTIVE_TOOL: {"value": 3, "from_unit": "km"},
 }
 SEND_METHODS = ("tools/list", "tools/call", "server/discover", "initialize", "ping", "subscriptions/listen")
 
@@ -5328,6 +5520,8 @@ def render_send_page() -> str:
         "consoleSource": INSPECT_CONSOLE_SOURCE,
         "sourceHeader": INSPECT_SOURCE_HEADER,
         "modernVersion": PROTOCOL_VERSION_2026,
+        "interactiveTool": INTERACTIVE_TOOL,
+        "capabilitiesKey": META_CLIENT_CAPABILITIES,
     }
     methods = "".join(f'<option value="{escape(name)}"></option>' for name in SEND_METHODS)
     tool_options = "".join(f'<option value="{escape(name)}"></option>' for name in tool_names)
@@ -5428,6 +5622,7 @@ _SEND_PAGE = """<!doctype html>
                 <option value="tools-list">툴 목록 (2026 방식)</option>
                 <option value="tools-call">툴 호출 (2026 방식)</option>
                 <option value="discover">서버 정보 (2026 방식)</option>
+                <option value="input-required">입력 요청 왕복 (2026 방식, input_required)</option>
                 <option value="legacy-tools-list">툴 목록 (2025 방식)</option>
                 <option value="legacy-tools-call">툴 호출 (2025 방식)</option>
                 <option value="missing-meta-version">틀린 요청: 바디에 버전 없음</option>
@@ -5509,6 +5704,10 @@ _SEND_PAGE = """<!doctype html>
         </div>
         <div class="note" id="callNote" role="status" aria-live="polite"></div>
         <pre id="lastResponse" class="response" tabindex="0" aria-label="응답 내용"></pre>
+        <div id="continueRow" class="stack" hidden>
+          <div class="actions"><button class="secondary" id="continueBtn" type="button">이어서 보내기</button></div>
+          <p class="hint">응답이 input_required입니다. 받은 requestState와 기본값을 채운 inputResponses를 넣은 다음 요청으로 요청 칸을 채웁니다. 값을 바꾸려면 붙여 넣기 칸에서 고친 뒤 채우기를 누르고, 보내기를 누르면 전송됩니다.</p>
+        </div>
         <p><a id="inspectLink" href="/inspect?screen=1" hidden>요청 기록에서 보기</a></p>
       </section>
     </div>
@@ -5550,6 +5749,11 @@ _SEND_PAGE_JS = r"""(function () {
     "tools-list": { mode: "2026", method: "tools/list" },
     "tools-call": { mode: "2026", method: "tools/call", tool: "convert_length", args: META.toolArgs.convert_length },
     "discover": { mode: "2026", method: "server/discover" },
+    // The tool asks through elicitation, so the request declares that capability.
+    "input-required": {
+      mode: "2026", method: "tools/call", tool: META.interactiveTool, args: META.toolArgs[META.interactiveTool],
+      params: { _meta: { [META.capabilitiesKey]: { elicitation: {} } } }
+    },
     "legacy-tools-list": { mode: "2025", method: "tools/list" },
     "legacy-tools-call": { mode: "2025", method: "tools/call", tool: "convert_length", args: META.toolArgs.convert_length },
     "missing-meta-version": { mode: "2026", method: "tools/list", omit: ["meta-version"] },
@@ -5566,6 +5770,8 @@ _SEND_PAGE_JS = r"""(function () {
   let copyValues = {};
   let sending = false;
   let addressBeforeExample = null;
+  // The retry the last response (input_required) asks for, as a request bundle.
+  let nextRequest = null;
   const clientCache = new Map();
   let runCount = 0;
   let serverHitCount = 0;
@@ -5772,6 +5978,22 @@ _SEND_PAGE_JS = r"""(function () {
     note.textContent = text;
   }
 
+  function setContinue(bundle) {
+    nextRequest = bundle;
+    byId("continueRow").hidden = !bundle;
+  }
+
+  /* Fills the form with the retry of an input_required result. Nothing is sent. */
+  function applyContinue() {
+    if (!nextRequest) return;
+    const bundle = Object.assign({}, nextRequest);
+    // Headers and omissions the last request was given by hand stay.
+    if (extra.headers) bundle.headers = extra.headers;
+    if (extra.omit.length) bundle.omit = extra.omit;
+    byId("pasteBox").value = JSON.stringify(bundle, null, 2);
+    if (applyPaste()) setContinue(null);
+  }
+
   function normalizedCacheKey(target, headers, payload) {
     if (!payload || payload.method !== "tools/list") return "";
     const params = payload.params && typeof payload.params === "object"
@@ -5822,6 +6044,7 @@ _SEND_PAGE_JS = r"""(function () {
     const sameOrigin = target.startsWith("/") || target.startsWith(location.origin);
     runCount += 1;
     updateMetrics();
+    setContinue(null);
 
     if (cacheKey) {
       const cached = clientCache.get(cacheKey);
@@ -5879,6 +6102,7 @@ _SEND_PAGE_JS = r"""(function () {
     else if (isError) verdict = "툴이 isError로 답했습니다.";
     setNote(result.ok && !error && !isError ? "ok" : "err", verdict + (cacheKey && ttlMs > 0 ? " " + ttlMs + "ms 동안 캐시에 둡니다." : ""));
     setResult("HTTP " + result.status, steps.join(" · "), response || "(바디 없음)");
+    setContinue(cMode.value === "2026" && responseJson ? UI.continueRequest(cUrl.value.trim(), parsedBody, responseJson.result) : null);
     const link = byId("inspectLink");
     link.hidden = !sameOrigin;
     const token = UI.tokenFromText(target.indexOf("cfg=") >= 0 ? target : "");
@@ -5960,6 +6184,7 @@ _SEND_PAGE_JS = r"""(function () {
   window.addEventListener("resize", syncExpandButtons);
   sendBtn.addEventListener("click", () => { runSend(1); });
   sendTwiceBtn.addEventListener("click", () => { runSend(2); });
+  byId("continueBtn").addEventListener("click", applyContinue);
 
   // /send?cfg=<code> (from the other screens) or ?url=<address> fills the address.
   const query = new URLSearchParams(location.search);
@@ -6034,7 +6259,7 @@ def advanced_field_groups() -> tuple[tuple[str, str, list[dict[str, Any]]], ...]
                     "modern.testTools",
                     "bool",
                     "테스트 툴 노출",
-                    f"{HEADER_PARAMS_TOOL}, {MRTR_TOOL}",
+                    ", ".join(MODERN_TEST_TOOL_NAMES),
                 ),
                 _advanced_field(
                     "modern.requiredClientCapabilities",
@@ -7395,6 +7620,72 @@ var UnitExpertUI = (function () {
     return { headers: headers, body: body, bodyText: bodyText };
   }
 
+  /* A value an elicitation answer can start from, for one requestedSchema property. */
+  function schemaDefault(schema) {
+    if (!isObject(schema)) return "";
+    if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
+    if (schema.default !== undefined) return schema.default;
+    if (schema.type === "boolean") return true;
+    if (schema.type === "integer" || schema.type === "number") {
+      var number = 1;
+      if (typeof schema.maximum === "number" && number > schema.maximum) number = schema.maximum;
+      if (typeof schema.minimum === "number" && number < schema.minimum) number = schema.minimum;
+      return number;
+    }
+    return "";
+  }
+
+  /* An answer to one entry of inputRequests, filled with default values. */
+  function inputResponseFor(request) {
+    if (!isObject(request)) return {};
+    var params = isObject(request.params) ? request.params : {};
+    if (request.method === "elicitation/create") {
+      var schema = isObject(params.requestedSchema) ? params.requestedSchema : {};
+      var properties = isObject(schema.properties) ? schema.properties : {};
+      var content = {};
+      Object.keys(properties).forEach(function (name) { content[name] = schemaDefault(properties[name]); });
+      return { action: "accept", content: content };
+    }
+    if (request.method === "sampling/createMessage") {
+      return { role: "assistant", content: { type: "text", text: "ok" }, model: CLIENT_INFO.name, stopReason: "endTurn" };
+    }
+    if (request.method === "roots/list") return { roots: [] };
+    return {};
+  }
+
+  /* The retry an input_required result asks for (basic/patterns/mrtr), as a
+     request bundle: the tools/call that was sent, plus inputResponses for the
+     keys of this result's inputRequests, the requestState as it was received
+     and another JSON-RPC id. null when there is nothing to continue. */
+  function continueRequest(url, sentBody, result) {
+    if (!isObject(sentBody) || sentBody.method !== "tools/call" || !isObject(sentBody.params)) return null;
+    if (!isObject(result) || result.resultType !== "input_required") return null;
+    var sent = sentBody.params;
+    if (typeof sent.name !== "string" || !sent.name) return null;
+    var params = {};
+    Object.keys(sent).forEach(function (key) {
+      if (["name", "arguments", "inputResponses", "requestState"].indexOf(key) < 0) params[key] = clone(sent[key]);
+    });
+    if (isObject(result.inputRequests)) {
+      params.inputResponses = {};
+      Object.keys(result.inputRequests).forEach(function (key) {
+        params.inputResponses[key] = inputResponseFor(result.inputRequests[key]);
+      });
+    }
+    if (result.requestState !== undefined) params.requestState = result.requestState;
+    var id = sentBody.id;
+    var bundle = {
+      mode: "2026",
+      method: "tools/call",
+      tool: sent.name,
+      args: isObject(sent.arguments) ? clone(sent.arguments) : {},
+      params: params,
+      id: typeof id === "number" ? id + 1 : (id === undefined || id === null ? 2 : String(id) + "-next")
+    };
+    if (url) bundle.url = url;
+    return bundle;
+  }
+
   /* The request bundle of a form state, to copy: form {url, mode, method,
      tool, args, id} plus what the edited headers and body differ in from the
      draft the form alone would make. */
@@ -7584,6 +7875,7 @@ var UnitExpertUI = (function () {
     parseRequestPaste: parseRequestPaste,
     paramHeaderValue: paramHeaderValue,
     buildRequestDraft: buildRequestDraft,
+    continueRequest: continueRequest,
     requestBundle: requestBundle,
     requestFormatText: requestFormatText,
     unknownConfigPaths: unknownConfigPaths,
@@ -9600,7 +9892,7 @@ def config_option_schema() -> list[dict[str, Any]]:
         # -- tools ----------------------------------------------------------
         _option(
             "modern.testTools", "tools", "bool", "테스트 툴 보이기",
-            f"툴 목록에 테스트용 툴({HEADER_PARAMS_TOOL}, {MRTR_TOOL})을 더합니다",
+            f"툴 목록에 테스트용 툴({', '.join(MODERN_TEST_TOOL_NAMES)})을 더합니다",
             "modern", **strict,
         ),
         _option(

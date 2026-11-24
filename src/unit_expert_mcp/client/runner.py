@@ -19,10 +19,14 @@ from .transport import Exchange
 
 PASS, FAIL, WARN, SKIP = "PASS", "FAIL", "WARN", "SKIP"
 GROUPS = ("modern", "modern-violation", "legacy", "auth", "compat", "injection")
-# Test tools of the unit-expert server (server.py: HEADER_PARAMS_TOOL, MRTR_TOOL).
-# They are only preferred when tools/list has them; otherwise tools are discovered.
+# Test tools of the unit-expert server (server.py: HEADER_PARAMS_TOOL, MRTR_TOOL,
+# INTERACTIVE_TOOL). They are only preferred when tools/list has them; otherwise
+# tools are discovered.
 DEFAULT_HEADER_TOOL = "echo_header_params"
 DEFAULT_INPUT_TOOL = "confirm_action"
+# input_required twice (target unit, then decimals) before the result.
+MULTI_ROUND_INPUT_TOOL = "convert_interactive"
+MULTI_ROUND_INPUT_ARGS = {"value": 3, "from_unit": "km"}
 CANARY_METHOD = "unit-expert-client/canary"
 
 

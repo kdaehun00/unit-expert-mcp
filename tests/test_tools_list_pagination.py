@@ -56,7 +56,7 @@ class PaginationTest(unittest.TestCase):
                 self.assertNotIn("nextCursor", payload["result"])
 
     def test_pages_cover_every_tool_exactly_once_in_order(self) -> None:
-        for era, total in (("legacy", 6), ("modern", 8)):
+        for era, total in (("legacy", 6), ("modern", 9)):
             _, _, everything = list_tools(era, None)
             assert everything is not None
             all_names = [tool["name"] for tool in everything["result"]["tools"]]
@@ -172,7 +172,7 @@ class PaginationTest(unittest.TestCase):
 class PaginationHttpTest(HttpServerTestCase):
     def test_walk_over_http_on_both_eras(self) -> None:
         config = paged(4)
-        for era, total in (("legacy", 6), ("modern", 8)):
+        for era, total in (("legacy", 6), ("modern", 9)):
             with self.subTest(era=era):
                 names: list[str] = []
                 cursor = None

@@ -91,8 +91,9 @@ class Protocol2026Test(unittest.TestCase):
         self.assertEqual(status, 200)
         assert payload is not None
         self.assertEqual(payload["result"]["resultType"], "complete")
-        # 6 converters + the 2 modern-only test tools (echo_header_params, confirm_action).
-        self.assertEqual(len(payload["result"]["tools"]), 8)
+        # 6 converters + the 3 modern-only test tools (echo_header_params, confirm_action,
+        # convert_interactive).
+        self.assertEqual(len(payload["result"]["tools"]), 9)
         self.assertIn(META_SERVER, payload["result"]["_meta"])
 
     def test_tools_list_can_advertise_positive_cache_ttl(self) -> None:

@@ -386,6 +386,7 @@ class DiscoverAndListShapeTest(unittest.TestCase):
         names = [tool["name"] for tool in modern["result"]["tools"]]
         self.assertIn("echo_header_params", names)
         self.assertIn("confirm_action", names)
+        self.assertIn("convert_interactive", names)
         legacy_names = [tool["name"] for tool in legacy["result"]["tools"]]
         self.assertEqual([tool["name"] for tool in hidden["result"]["tools"]], legacy_names)
         self.assertEqual(len(legacy_names), 6)

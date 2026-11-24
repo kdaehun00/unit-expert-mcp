@@ -125,7 +125,7 @@
 
 | 키 | 값 | 기본 | 효과 | 적용 era |
 |---|---|---|---|---|
-| `modern.testTools` | bool | `true` | 모던 `tools/list`에 테스트 툴 `echo_header_params`, `confirm_action`을 노출한다. 끄면 목록에서 빠지고 호출하면 알 수 없는 툴이 된다 | 모던 |
+| `modern.testTools` | bool | `true` | 모던 `tools/list`에 테스트 툴 `echo_header_params`, `confirm_action`, `convert_interactive`를 노출한다. 끄면 목록에서 빠지고 호출하면 알 수 없는 툴이 된다 | 모던 |
 | `modern.requiredClientCapabilities` | `elicitation`, `sampling`, `roots`의 목록 | `[]` | `server/discover`를 뺀 모든 모던 요청에서 `_meta` clientCapabilities에 이 항목이 객체로 선언돼 있지 않으면 400 + `-32021`, `data.requiredCapabilities`에 빠진 항목을 담는다 | 모던 |
 | `modern.invalidParamsHttpStatus` | `200`, `400` | `200` | 스펙이 HTTP 상태를 정하지 않은 `-32602`(알 수 없는 툴, 잘못된 커서, 무효한 `requestState`, 형식이 틀린 `tools/call` 파라미터)의 HTTP 상태. 필수 `_meta` 누락의 `-32602`는 스펙대로 항상 400이다 | 모던 |
 | `modern.rejectUnexpectedParamHeader` | bool | `true` | `Mcp-Param-*` 헤더가 왔는데 바디에 그 인자 값이 없을 때(`null`이거나 인자에 없음)의 처리. `true`면 400 + `-32020`, `false`면 그 헤더를 무시하고 처리한다. 스펙에 이 경우의 규정이 없어 둔 옵션이다(아래 근거) | 모던 |
@@ -197,6 +197,24 @@
 | 변조됐거나, 다른 인자에 쓰였거나, 10분이 지난 `requestState` | `-32602` |
 | `_meta` clientCapabilities에 `elicitation` 객체가 없음 | 400 + `-32021`, `data.requiredCapabilities: {elicitation: {}}` |
 | `action`이 빈 문자열이거나 문자열이 아님 | `isError: true` 결과 |
+
+**`convert_interactive`**: input_required(MRTR)를 두 번 오가는 대화형 단위 변환. 인자는 `value`(number, 필수), `from_unit`(string, 필수). 바꿀 단위는 인자로 받지 않고 묻는다.
+
+| 요청 | 응답 |
+|---|---|
+| 1차 호출 | `resultType: "input_required"`, `inputRequests.target_unit`(`elicitation/create`, form 모드, `to_unit: string`, `enum`은 `from_unit`과 같은 종류의 다른 단위), `requestState` |
+| 2차: `inputResponses.target_unit`이 `{action: "accept", content: {to_unit: "m"}}` + 1차의 `requestState` | `resultType: "input_required"`, `inputRequests.precision`(`decimals: integer`, 0~10), 새 `requestState`(고른 단위가 들어 있다) |
+| 3차: `inputResponses.precision`이 `{action: "accept", content: {decimals: 2}}` + 2차의 `requestState` | `resultType: "complete"`, 예: `3 km = 3000.00 m` |
+| 어느 라운드에서든 `action`이 `decline` 또는 `cancel` | `resultType: "complete"`, `isError: false`(변환하지 않았다는 문구) |
+| 그 라운드의 응답이 없거나 틀림(필드 누락, `enum` 밖의 단위, 범위 밖 숫자, 다른 라운드의 키) | 같은 라운드의 `input_required`를 다시 준다. `message` 둘째 줄에 이유가 붙는다 |
+| 2차 응답(`precision`)을 1차의 `requestState`와 함께 보냄 | 서버가 아는 것은 1차 상태뿐이므로 `target_unit`을 다시 묻는다 |
+| `requestState` 없이 `inputResponses`만 | 1차 호출로 취급 |
+| 변조됐거나, 다른 인자·다른 툴에 쓰였거나, 10분이 지난 `requestState` | `-32602` |
+| `_meta` clientCapabilities에 `elicitation` 객체가 없음 | 400 + `-32021`, `data.requiredCapabilities: {elicitation: {}}` |
+| 모르는 `from_unit`, 숫자가 아닌 `value` | `isError: true` 결과(`unsupported unit '…'. Supported units: …`) |
+
+- 재요청에는 가장 최근에 받은 `requestState`와 그 라운드의 `inputResponses`만 있으면 된다. 이전 라운드의 응답은 다시 보내지 않는다.
+- 서버는 라운드 사이에 상태를 저장하지 않는다. 진행 상황은 HMAC으로 보호한 `requestState`에만 있으므로 유효 시간 안에는 같은 `requestState`를 다시 써도 같은 라운드로 처리된다.
 
 `requestState`는 툴 이름, 인자 해시, 만료 시각을 HMAC으로 서명한 값이다. 재요청의 JSON-RPC `id`가 첫 요청과 다른지는 서버가 검사하지 않는다.
 
@@ -309,7 +327,7 @@
 | `empty` | 200 | 빈 본문(`Content-Length: 0`) |
 | `disconnect` | 없음 | 응답 없이 연결을 끊는다 |
 
-`sse`와 `id-mismatch`는 정상 실행 결과를 감싼다. `confirm_action`의 `input_required` 결과도 결과이므로 주입 대상이다.
+`sse`와 `id-mismatch`는 정상 실행 결과를 감싼다. `confirm_action`과 `convert_interactive`의 `input_required` 결과도 결과이므로 주입 대상이다.
 
 ## 레거시 세션
 
