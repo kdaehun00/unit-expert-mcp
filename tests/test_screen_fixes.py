@@ -314,9 +314,19 @@ class ScreenLogicTest(UiCoreTestCase):
     def test_option_search_finds_the_server_generation(self) -> None:
         option = self.options["serverEra"]
         results = self.run_calls(
-            [["matchOptionSearch", option, query] for query in ("serverEra", "지원 스펙", "2025 방식만", "세션")]
+            [["matchOptionSearch", option, query] for query in ("serverEra", "지원 스펙", "2025 방식만", "캐시")]
         )
         self.assertEqual([result["value"] for result in results], [True, True, True, False])
+
+    def test_option_search_reads_the_help_lines_too(self) -> None:
+        results = self.run_calls(
+            [
+                ["matchOptionSearch", self.options["strict2026"], "필수 헤더"],
+                ["matchOptionSearch", self.options["allowedOrigins"], "curl"],
+                ["matchOptionSearch", self.options["mcp.serviceName"], "curl"],
+            ]
+        )
+        self.assertEqual([result["value"] for result in results], [True, True, False])
 
 
 class PageWordingTest(unittest.TestCase):
@@ -400,10 +410,15 @@ class PageWordingTest(unittest.TestCase):
         self.assertIn('"복사했습니다: " + label', self.scenario)
         self.assertNotIn("을(를)", self.scenario)
         self.assertNotIn("오른쪽", self.scenario)
-        # Everything but the address is under "더 보기", each with what it copies.
+        # Everything but the address is under "다른 형태로 복사", each with what it copies.
         folded = dom.by_id("moreBox")["text"]
-        for label in ("설정 코드", "요청 헤더로", "테스트 명령", "curl", "설정 JSON", "설정 불러오기"):
+        for label in ("다른 형태로 복사", "설정 코드", "요청 헤더로", "테스트 명령", "curl", "설정 JSON"):
             self.assertIn(label, folded)
+        # Pasting a config is under the basic settings, with the format to give an AI.
+        load = dom.by_id("loadBox")["text"]
+        for label in ("설정 불러오기", "불러오기", "설정 JSON 형식"):
+            self.assertIn(label, load)
+        self.assertNotIn("설정 불러오기", folded)
 
     def test_inspect_page_holds_what_the_server_keeps(self) -> None:
         size = INSPECT_LOG.maxlen
@@ -718,7 +733,7 @@ class InspectPageBehaviourTest(InspectPageScriptTest):
         empty, shown = result["empty"], result["shown"]
         self.assertEqual(self.shown(empty), [])
         self.assertFalse(empty["emptyHidden"])
-        self.assertIn("요청 보내기 화면에서 보낸 요청 2건만 있고, 지금은 숨겨져 있습니다.", empty["emptyText"])
+        self.assertIn("MCP 클라이언트 화면에서 보낸 요청 2건만 있고, 지금은 숨겨져 있습니다.", empty["emptyText"])
         self.assertNotIn("이 주소로 온 요청이 아직 없습니다", empty["emptyText"])
         self.assertFalse(empty["emptyShowHidden"])
         self.assertEqual(empty["emptyShow"], "보기")
@@ -739,7 +754,7 @@ class InspectPageBehaviourTest(InspectPageScriptTest):
         none = result["none"]
         self.assertIn(
             "필터에 맞는 요청이 없습니다. 5건이 가려져 있습니다: "
-            "결과 5건, 요청 보내기 화면에서 보낸 요청 숨기기 1건, OPTIONS 숨기기 1건",
+            "결과 5건, MCP 클라이언트 화면에서 보낸 요청 숨기기 1건, OPTIONS 숨기기 1건",
             none["emptyText"],
         )
         self.assertEqual(none["emptyShow"], "가린 필터 풀기")
@@ -757,7 +772,7 @@ class InspectPageBehaviourTest(InspectPageScriptTest):
                 {"snapshot": "shown"},
             ]
         )
-        self.assertEqual(result["hidden"]["newBannerWhy"], "가린 필터: 요청 보내기 화면에서 보낸 요청 숨기기 1건.")
+        self.assertEqual(result["hidden"]["newBannerWhy"], "가린 필터: MCP 클라이언트 화면에서 보낸 요청 숨기기 1건.")
         shown = result["shown"]
         self.assertEqual(self.shown(shown), [6, 5, 3, 2, 1])
         self.assertTrue(shown["hideOptions"])

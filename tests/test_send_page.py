@@ -77,7 +77,8 @@ class SendPageStructureTest(unittest.TestCase):
         links = [element for element in self.dom.by_tag("a") if element["attrs"].get("href") in {"/scenario", "/send", "/inspect"}]
         self.assertEqual([link["attrs"]["href"] for link in links[:3]], ["/scenario", "/send", "/inspect"])
         self.assertEqual([link["attrs"].get("aria-current") for link in links[:3]], [None, "page", None])
-        self.assertIn("요청 보내기", nav["text"])
+        for label in ("MCP 서버 만들기", "MCP 클라이언트", "호출 기록"):
+            self.assertIn(label, nav["text"])
 
     def test_every_control_has_a_label_and_ids_are_unique(self) -> None:
         label_targets = {label["attrs"].get("for") for label in self.dom.by_tag("label")}

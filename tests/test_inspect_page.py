@@ -80,7 +80,7 @@ class InspectPageStructureTest(unittest.TestCase):
             if element["attrs"].get("href") in {"/scenario", "/send", "/inspect"}
             and not element["attrs"].get("id") and not element["attrs"].get("class")
         }
-        for label in ("서버 설정", "요청 보내기", "요청 기록"):
+        for label in ("MCP 서버 만들기", "MCP 클라이언트", "호출 기록"):
             self.assertIn(label, nav["text"])
         self.assertEqual(set(links), {"/scenario", "/send", "/inspect"})
         self.assertEqual(links["/inspect"]["attrs"].get("aria-current"), "page")
@@ -148,7 +148,7 @@ class InspectPageStructureTest(unittest.TestCase):
         visible = self.page.split("<script>")[0]
         for old_name in ("레거시", "주입", "서버 세대", "cfg 토큰", "검증 거부", "RAW", "전역"):
             self.assertNotIn(old_name, visible)
-        self.assertIn("서버 설정에서 주소를 만들어 연결하면 여기에 나타납니다", self.page)
+        self.assertIn("MCP 서버 만들기에서 주소를 만들어 연결하면 여기에 나타납니다", self.page)
 
     def test_live_regions_and_focus_style(self) -> None:
         for element_id in ("resultCount", "liveStatus", "announce", "detailStatus"):
@@ -574,7 +574,7 @@ function findButton(node, text) {
         self.assertEqual(first["rows"], [])
         self.assertEqual(first["count"], "0건")
         self.assertFalse(first["emptyHidden"])
-        self.assertIn("서버 설정에서 주소를 만들어 연결하면 여기에 나타납니다", first["emptyText"])
+        self.assertIn("MCP 서버 만들기에서 주소를 만들어 연결하면 여기에 나타납니다", first["emptyText"])
         self.assertTrue(first["addrBoxHidden"])
         self.assertEqual((first["scopeAll"], first["scopePlain"]), ("true", "false"))
         self.assertEqual(first["groupRequests"], 1)
@@ -613,7 +613,7 @@ function findButton(node, text) {
         # The addresses that got requests, newest first. OPTIONS is not counted.
         self.assertEqual(
             [(address["title"], address["meta"].split(" · ")[0]) for address in first["addresses"]],
-            [("기본 주소 (설정 없음)", "요청 3건 (요청 보내기 화면 1건)"), ("지원 스펙 = legacy", "요청 1건")],
+            [("기본 주소 (설정 없음)", "요청 3건 (MCP 클라이언트 화면 1건)"), ("지원 스펙 = legacy", "요청 1건")],
         )
         self.assertFalse(any(address["pressed"] for address in first["addresses"]))
         self.assertFalse(first["filterBoxOpen"])
@@ -875,7 +875,7 @@ function findButton(node, text) {
             '"header": "tools/list"',
             "설정이 온 곳: 주소에 담긴 설정",
             "지원 스펙 = legacy",
-            "서버 설정에서 열기",
+            "MCP 서버 만들기에서 열기",
             "요청 방식: 2026 방식 · 서버가 지원하는 스펙: 2025 방식만 (legacy)",
             "헤더와 바디 비교",
             "디코드: 한글",

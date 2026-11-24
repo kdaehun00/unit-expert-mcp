@@ -466,7 +466,7 @@ class RecordedExchangeOnScreenTest(PresetCase):
                 )
 
     def test_the_default_filters_hide_the_scenario_preview(self) -> None:
-        """/scenario preview -> "이 URL의 요청 기록 보기": the preview's own requests
+        """/scenario preview -> "이 주소의 호출 기록 보기": the preview's own requests
         are hidden by the default filters (documented in the README)."""
         token = preset_token("tools-list-paged")
         entry = self.send(token, legacy_request("tools/list"), {"X-Unit-Expert-Source": "scenario-preview"})[4]

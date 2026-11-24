@@ -4055,7 +4055,7 @@ _INSPECT_PAGE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Unit Expert MCP · 요청 기록</title>
+  <title>Unit Expert MCP · 호출 기록</title>
   <style>
     __BASE_CSS__
     __NAV_CSS__
@@ -4219,7 +4219,7 @@ _INSPECT_PAGE = """<!doctype html>
 <body>
   __NAV__
   <main>
-    <h1>요청 기록</h1>
+    <h1>호출 기록</h1>
     <p class="lead">MCP 주소로 온 요청과 서버가 보낸 응답입니다.</p>
     <p class="caution" id="caution" role="note">__CAUTION__</p>
 
@@ -4237,8 +4237,8 @@ _INSPECT_PAGE = """<!doctype html>
       <div id="cfgSummary" class="cfg-summary" hidden>
         <strong id="cfgSummaryText"></strong>
         <ul id="cfgChips" class="chips"></ul>
-        <a id="cfgScenarioLink" href="/scenario">서버 설정에서 열기</a>
-        <a id="cfgSendLink" href="/send">이 주소로 요청 보내기</a>
+        <a id="cfgScenarioLink" href="/scenario">MCP 서버 만들기에서 열기</a>
+        <a id="cfgSendLink" href="/send">MCP 클라이언트에서 열기</a>
       </div>
       <div id="addrBox" hidden>
         <h3 id="addrListTitle">최근 요청이 온 주소</h3>
@@ -4291,7 +4291,7 @@ _INSPECT_PAGE = """<!doctype html>
           </div>
         </div>
         <div class="filter-row">
-          <label class="check"><input type="checkbox" id="fHideScreen"> 요청 보내기 화면에서 보낸 요청 숨기기</label>
+          <label class="check"><input type="checkbox" id="fHideScreen"> MCP 클라이언트 화면에서 보낸 요청 숨기기</label>
           <label class="check"><input type="checkbox" id="fHideOptions"> OPTIONS 숨기기</label>
           <label class="check"><input type="checkbox" id="fErrorsOnly"> 에러만</label>
           <button type="button" class="secondary" id="resetFilters">처음으로</button>
@@ -4347,7 +4347,7 @@ _INSPECT_PAGE = """<!doctype html>
           <div class="empty-actions">
             <button type="button" id="emptyShow" hidden>보기</button>
             <button type="button" class="secondary" id="emptyReset">모든 주소, 필터 처음으로</button>
-            <a class="button secondary" href="/scenario">서버 설정으로</a>
+            <a class="button secondary" href="/scenario">MCP 서버 만들기로</a>
           </div>
         </div>
       </section>
@@ -4402,7 +4402,7 @@ _INSPECT_PAGE_JS = r"""(function () {
   // What each filter is called on screen, and the value that lets everything through.
   const FILTER_NAMES = {
     text: "검색어", kind: "결과", status: "HTTP 상태", era: "요청 방식", method: "메서드",
-    errorsOnly: "에러만", hideScreen: "요청 보내기 화면에서 보낸 요청 숨기기", hideOptions: "OPTIONS 숨기기"
+    errorsOnly: "에러만", hideScreen: "MCP 클라이언트 화면에서 보낸 요청 숨기기", hideOptions: "OPTIONS 숨기기"
   };
   const FILTER_OFF = {
     text: "", kind: "", status: "", era: "", method: "",
@@ -4596,7 +4596,7 @@ _INSPECT_PAGE_JS = r"""(function () {
         el("span", { class: "addr-title", text: row.title }),
         el("span", {
           class: "addr-meta",
-          text: "요청 " + row.count + "건" + (row.screen ? " (요청 보내기 화면 " + row.screen + "건)" : "") +
+          text: "요청 " + row.count + "건" + (row.screen ? " (MCP 클라이언트 화면 " + row.screen + "건)" : "") +
             " · 마지막 " + (UI.formatLocalStamp(row.lastTimestamp).slice(0, -4) || "-")
         })
       );
@@ -4694,7 +4694,7 @@ _INSPECT_PAGE_JS = r"""(function () {
         setScope("", true);
         return;
       }
-      setText("cfgError", "MCP 주소로 읽지 못했습니다. 서버 설정 화면의 '주소 복사'로 복사한 주소를 붙여 넣으세요.");
+      setText("cfgError", "MCP 주소로 읽지 못했습니다. MCP 서버 만들기 화면의 '주소 복사'로 복사한 주소를 붙여 넣으세요.");
       return;
     }
     setScope(token, false);
@@ -4987,12 +4987,12 @@ _INSPECT_PAGE_JS = r"""(function () {
       } else if (total === 0 && filters.plain) {
         text = "기본 주소(설정 없는 /mcp)로 온 요청이 아직 없습니다.";
       } else if (total === 0) {
-        text = "아직 온 요청이 없습니다. 서버 설정에서 주소를 만들어 연결하면 여기에 나타납니다.";
+        text = "아직 온 요청이 없습니다. MCP 서버 만들기에서 주소를 만들어 연결하면 여기에 나타납니다.";
       } else if (hiddenByScreen === total) {
         text = "지금까지의 기록을 숨겼습니다. 새 요청이 오면 여기에 나타납니다.";
       } else if (onlyScreen) {
         blockingKeys = why.keys;
-        text = "요청 보내기 화면에서 보낸 요청 " + filtered.length + "건만 있고, 지금은 숨겨져 있습니다.";
+        text = "MCP 클라이언트 화면에서 보낸 요청 " + filtered.length + "건만 있고, 지금은 숨겨져 있습니다.";
       } else {
         blockingKeys = why.keys;
         text = "필터에 맞는 요청이 없습니다. " + total + "건이 가려져 있습니다" + (why.text ? ": " + why.text : "") + ".";
@@ -5200,7 +5200,7 @@ _INSPECT_PAGE_JS = r"""(function () {
       class: "hint",
       text: "요청 방식: " + (ERA_SHORT[UI.requestMode(x)] || MODE_UNKNOWN) + " · 서버가 지원하는 스펙: " +
         (x.serverEra ? SERVER_ERA_LABELS[x.serverEra] + " (" + x.serverEra + ")" : ERA_UNKNOWN) +
-        (x.source ? " · 요청 보내기 화면에서 보낸 요청" : "")
+        (x.source ? " · MCP 클라이언트 화면에서 보낸 요청" : "")
     }));
     let token = x.configSource === "url" ? x.cfg : null;
     if (x.configSource === "header") {
@@ -5218,7 +5218,7 @@ _INSPECT_PAGE_JS = r"""(function () {
       const actions = el(
         "div",
         { class: "d-actions" },
-        el("a", { href: "/scenario#cfg=" + encodeURIComponent(token), text: "서버 설정에서 열기" })
+        el("a", { href: "/scenario#cfg=" + encodeURIComponent(token), text: "MCP 서버 만들기에서 열기" })
       );
       if (x.configSource === "url" && filters.cfg !== token) {
         const only = el("button", { type: "button", class: "secondary small", text: "이 주소로 온 요청만 보기" });
@@ -5547,7 +5547,7 @@ _SEND_PAGE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Unit Expert MCP · 요청 보내기</title>
+  <title>Unit Expert MCP · MCP 클라이언트</title>
   <style>
     __BASE_CSS__
     __NAV_CSS__
@@ -5589,7 +5589,7 @@ _SEND_PAGE = """<!doctype html>
 <body>
   __NAV__
   <main>
-    <h1>요청 보내기</h1>
+    <h1>MCP 클라이언트</h1>
     <p class="lead">MCP 주소로 요청을 보내고 응답을 봅니다.</p>
     <div class="send-layout">
       <div class="stack">
@@ -5708,7 +5708,7 @@ _SEND_PAGE = """<!doctype html>
           <div class="actions"><button class="secondary" id="continueBtn" type="button">이어서 보내기</button></div>
           <p class="hint">응답이 input_required입니다. 받은 requestState와 기본값을 채운 inputResponses를 넣은 다음 요청으로 요청 칸을 채웁니다. 값을 바꾸려면 붙여 넣기 칸에서 고친 뒤 채우기를 누르고, 보내기를 누르면 전송됩니다.</p>
         </div>
-        <p><a id="inspectLink" href="/inspect?screen=1" hidden>요청 기록에서 보기</a></p>
+        <p><a id="inspectLink" href="/inspect?screen=1" hidden>호출 기록에서 보기</a></p>
       </section>
     </div>
   </main>
@@ -6801,11 +6801,32 @@ var UnitExpertUI = (function () {
     return parts.join(" ");
   }
 
-  /* Every word of query appears in the option's label, key, description or choices. */
+  /* Where the config screen shows an option: "basic" (the four at the top),
+     "advanced" (the other build options) or "error". */
+  function optionTier(option) {
+    if (option.basic) return "basic";
+    return option.section === "error" ? "error" : "advanced";
+  }
+
+  /* How many options of each tier differ from their default:
+     {basic, advanced, error}. The folded parts of the config screen show the
+     number and open when it is 1 or more. */
+  function changedCounts(config, schema) {
+    var counts = { basic: 0, advanced: 0, error: 0 };
+    (schema || []).forEach(function (option) {
+      var value = getPath(config, option.path);
+      if (value === undefined || deepEqual(value, option["default"])) return;
+      counts[optionTier(option)] += 1;
+    });
+    return counts;
+  }
+
+  /* Every word of query appears in the option's label, key, description,
+     "자세히" lines or choices. */
   function matchOptionSearch(option, query) {
     var words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) return true;
-    var parts = [option.label, option.path, option.description];
+    var parts = [option.label, option.path, option.description].concat(option.help || []);
     (option.choices || []).concat(option.suggestions || []).forEach(function (choice) {
       parts.push(String(choice.value), choice.label || "", choice.description || "");
     });
@@ -7727,7 +7748,7 @@ var UnitExpertUI = (function () {
      format with two examples, to hand to an AI or a colleague. */
   function requestFormatText() {
     return [
-      "MCP 테스트 요청 JSON 형식 (요청 보내기 화면에 붙여 넣으면 폼이 채워집니다)",
+      "MCP 테스트 요청 JSON 형식 (MCP 클라이언트 화면에 붙여 넣으면 폼이 채워집니다)",
       "",
       "JSON 객체 하나입니다. method만 필수이고 나머지는 생략할 수 있습니다.",
       '- url: 보낼 주소. 생략하면 화면에 있는 주소를 그대로 씁니다. 예) "/mcp", "/mcp?cfg=<설정 코드>"',
@@ -7799,7 +7820,7 @@ var UnitExpertUI = (function () {
      [{id, label}] in display order. */
   function configFormatText(schema, sections, origin) {
     var lines = [
-      "MCP 테스트 서버 설정 JSON 형식 (서버 설정 화면의 '설정 불러오기'에 붙여 넣습니다)",
+      "MCP 테스트 서버 설정 JSON 형식 (MCP 서버 만들기 화면의 '설정 불러오기'에 붙여 넣습니다)",
       "",
       "기본값과 다르게 바꿀 항목만 담은 JSON 객체입니다. {}는 기본 설정입니다.",
       '경로의 점(.)마다 한 단계 중첩합니다. 예) toolCall.mode → {"toolCall": {"mode": "is-error"}}',
@@ -7905,6 +7926,8 @@ var UnitExpertUI = (function () {
     buildCurl: buildCurl,
     buildCliCommand: buildCliCommand,
     matchOptionSearch: matchOptionSearch,
+    optionTier: optionTier,
+    changedCounts: changedCounts,
     classifyExchange: classifyExchange,
     isDelayLabel: isDelayLabel,
     requestMode: requestMode,
@@ -8107,7 +8130,7 @@ UI_NAV_CSS = """
     }
 """
 
-NAV_ITEMS = (("scenario", "/scenario", "서버 설정"), ("send", "/send", "요청 보내기"), ("inspect", "/inspect", "요청 기록"))
+NAV_ITEMS = (("scenario", "/scenario", "MCP 서버 만들기"), ("send", "/send", "MCP 클라이언트"), ("inspect", "/inspect", "호출 기록"))
 
 
 def render_nav(current: str) -> str:
@@ -8161,25 +8184,45 @@ def _default_text(option: dict[str, Any]) -> str:
         return "켬" if value else "끔"
     if option["kind"] in {"list", "json"}:
         return ", ".join(str(item) for item in value) if value else "비움"
+    # A choice with a plain name is called by that name.
+    for choice in option.get("choices") or []:
+        if choice["value"] == value and choice.get("label"):
+            return str(choice["label"])
     return str(value)
 
 
+def _sentence(text: str) -> str:
+    """Escaped text that ends like a sentence."""
+    text = escape(text)
+    return text if not text or text.endswith((".", ")")) else text + "."
+
+
 def _choice_list(choices: list[dict[str, Any]]) -> str:
+    """One line per named choice: its name, what the server does, the config value in small type."""
     items = ""
     for choice in choices:
         name = f'<strong>{escape(str(choice["label"]))}</strong> ' if choice.get("label") else ""
         items += (
-            f'<li>{name}<code>{escape(str(choice["value"]))}</code> {escape(str(choice["description"]))}</li>'
+            f'<li>{name}{_sentence(str(choice["description"]))} '
+            f'<code class="opt-key">{escape(str(choice["value"]))}</code></li>'
         )
     return f'<ul class="choice-list">{items}</ul>'
 
 
 def _option_text(choice: dict[str, Any]) -> str:
-    """Visible text of one <option>: the plain name with the value, or the value with what it does."""
-    value = str(choice["value"])
+    """Visible text of one <option>: the plain name, or the value with what it does."""
     if choice.get("label"):
-        return f'{choice["label"]} ({value})'
-    return f'{value} · {choice["description"]}'
+        return str(choice["label"])
+    return f'{choice["value"]} · {choice["description"]}'
+
+
+def _help_box(option: dict[str, Any]) -> str:
+    """The lines of ``help`` under "자세히", folded. Empty when the option has none."""
+    lines = option.get("help") or []
+    if not lines:
+        return ""
+    items = "".join(f"<li>{escape(line)}</li>" for line in lines)
+    return f'<details class="opt-help"><summary>자세히</summary><ul>{items}</ul></details>'
 
 
 def render_option(option: dict[str, Any]) -> str:
@@ -8214,7 +8257,9 @@ def render_option(option: dict[str, Any]) -> str:
         )
         control = f'<select {attrs} data-config-kind="enum">{options}</select>'
         # Named choices are explained under the select; the others say what they do in the option itself.
-        extra = _choice_list(choices) if any(choice.get("label") for choice in choices) else ""
+        if any(choice.get("label") for choice in choices):
+            extra = _choice_list(choices)
+            wide = True
     elif kind in {"int", "float"}:
         low, high = option.get("min"), option.get("max")
         bounds = "".join(
@@ -8274,9 +8319,9 @@ def render_option(option: dict[str, Any]) -> str:
             f'<input type="text" {attrs} data-config-kind="string"{list_attr} autocomplete="off" spellcheck="false">'
         )
 
-    description = escape(option["description"])
-    if description and not description.endswith((".", ")")):
-        description += "."
+    description = _sentence(option["description"])
+    # A long "자세히" list reads badly in half a row.
+    wide = wide or len(option.get("help") or []) > 3
     badge = APPLIES_TO_BADGES.get(option["appliesTo"])
     badge_html = f'<span class="era-badge">{escape(badge)}</span>' if badge else ""
     return f"""
@@ -8287,67 +8332,63 @@ def render_option(option: dict[str, Any]) -> str:
             <span class="changed-mark" hidden>바꿈</span>
             <button type="button" class="link-button opt-reset" data-reset="{escape(path)}" hidden>되돌리기</button>
           </div>
-          <p class="opt-desc" id="{desc_id}">{description} <span class="opt-default">기본값: {escape(_default_text(option))}</span> <code class="opt-key">{escape(path)}</code></p>
+          <p class="opt-desc" id="{desc_id}">{description}</p>
           {control}
           {extra}
+          {_help_box(option)}
+          <p class="opt-meta"><span class="opt-default">기본값: {escape(_default_text(option))}</span> <code class="opt-key">{escape(path)}</code></p>
           <p class="opt-reason" hidden></p>
         </div>"""
 
 
-def _group_rows(meta: dict[str, Any], group_id: str) -> str:
-    """Rows of one group. Rarely used ones (``detail``) go under "세부 설정"."""
-    options = [option for option in meta["options"] if option["group"] == group_id]
-    rows = "".join(render_option(option) for option in options if not option.get("detail"))
-    details = [option for option in options if option.get("detail")]
-    if details:
-        rows += f"""
-        <details class="more-opts" data-detail="{escape(group_id)}">
-          <summary>세부 설정 {len(details)}개 <span class="group-badge" hidden></span></summary>
-          <div class="group-body">{"".join(render_option(option) for option in details)}
-          </div>
-        </details>"""
-    return rows
+def render_option_groups(meta: dict[str, Any]) -> tuple[str, str, str]:
+    """(basic rows, advanced cards, error groups) in the order of the meta.
 
-
-def render_option_groups(meta: dict[str, Any]) -> tuple[str, str]:
-    """(build cards, error groups) in the order of meta["groups"].
-
-    A build group is a card that is always open. An error group folds; the
-    ones marked ``open`` start expanded.
+    Basic: the options marked ``basic``, always in view at the top. Advanced:
+    the other build options, one card per group (a group left without options
+    has no card). Error: one folding group each; the ones marked ``open``
+    start expanded once "에러 넣기" itself is opened.
     """
-    build: list[str] = []
+    basic = "".join(render_option(option) for option in meta["options"] if option.get("basic"))
+    advanced: list[str] = []
     error: list[str] = []
     for group in meta["groups"]:
         group_id = escape(group["id"])
-        rows = _group_rows(meta, group["id"])
+        rows = "".join(
+            render_option(option)
+            for option in meta["options"]
+            if option["group"] == group["id"] and not option.get("basic")
+        )
+        if not rows:
+            continue
         if group["section"] == "build":
-            build.append(
+            advanced.append(
                 f"""
-      <section class="card group-card" data-group="{group_id}" aria-labelledby="g-{group_id}">
-        <div class="group-head">
-          <h3 id="g-{group_id}" class="group-title">{escape(group["label"])}</h3>
-          <span class="group-badge" hidden></span>
-          <span class="group-desc">{escape(group["description"])}</span>
-        </div>
-        <div class="group-body">{rows}
-        </div>
-      </section>"""
+        <section class="group-card" data-group="{group_id}" aria-labelledby="g-{group_id}">
+          <div class="group-head">
+            <h3 id="g-{group_id}" class="group-title">{escape(group["label"])}</h3>
+            <span class="group-badge" hidden></span>
+            <span class="group-desc">{escape(group["description"])}</span>
+          </div>
+          <div class="group-body">{rows}
+          </div>
+        </section>"""
             )
             continue
         open_attr = ' open data-default-open="1"' if group.get("open") else ""
         error.append(
             f"""
-      <details class="group" data-group="{group_id}"{open_attr}>
-        <summary>
-          <span class="group-title">{escape(group["label"])}</span>
-          <span class="group-badge" hidden></span>
-          <span class="group-desc">{escape(group["description"])}</span>
-        </summary>
-        <div class="group-body">{rows}
-        </div>
-      </details>"""
+        <details class="group" data-group="{group_id}"{open_attr}>
+          <summary>
+            <span class="group-title">{escape(group["label"])}</span>
+            <span class="group-badge" hidden></span>
+            <span class="group-desc">{escape(group["description"])}</span>
+          </summary>
+          <div class="group-body">{rows}
+          </div>
+        </details>"""
         )
-    return "".join(build), "".join(error)
+    return basic, "".join(advanced), "".join(error)
 
 
 MATRIX_CELL_NOTES = {
@@ -8410,7 +8451,7 @@ def render_presets(meta: dict[str, Any]) -> tuple[str, str]:
 
 def render_scenario_page(message: str | None = None, error: str | None = None) -> str:
     meta = scenario_meta()
-    build_groups, error_groups = render_option_groups(meta)
+    basic_rows, advanced_groups, error_groups = render_option_groups(meta)
     notice = ""
     if message:
         notice = f'<div class="notice success" role="status">{escape(message)}</div>'
@@ -8429,11 +8470,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
     copy_items = "".join(
         render_copy_item(key, label, copy_label)
         for key, label, copy_label in (
-            ("curlModern", "curl로 툴 목록 요청 (2026 방식)", "curl 명령(2026 방식)"),
-            ("curlLegacy", "curl로 initialize 요청 (2025 방식)", "curl 명령(2025 방식)"),
+            ("configJson", "설정 JSON (기본값과 다른 부분)", "설정 JSON"),
             ("token", "설정 코드 (주소의 cfg= 뒤에 붙는 값)", "설정 코드"),
             ("header", "주소 대신 요청 헤더로 설정 넣기", "요청 헤더"),
-            ("configJson", "설정 JSON", "설정 JSON"),
+            ("curlModern", "curl로 툴 목록 요청 (2026 방식)", "curl 명령(2026 방식)"),
+            ("curlLegacy", "curl로 initialize 요청 (2025 방식)", "curl 명령(2025 방식)"),
             ("cliProbe", "테스트 명령: 서버가 지원하는 스펙 확인", "테스트 명령(probe)"),
             ("cliRun", "테스트 명령: 전체 검사", "테스트 명령(run all)"),
         )
@@ -8445,11 +8486,11 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
             "NAV_CSS": UI_NAV_CSS,
             "NAV": render_nav("scenario"),
             "NOTICE": notice,
-            "BUILD_DESC": escape(sections["build"]["description"]),
             "ERROR_DESC": escape(sections["error"]["description"]),
             "MATRIX": matrix_html,
             "INJECTIONS": injection_html,
-            "BUILD_GROUPS": build_groups,
+            "BASIC_ROWS": basic_rows,
+            "ADVANCED_GROUPS": advanced_groups,
             "ERROR_GROUPS": error_groups,
             "COPY_ITEMS": copy_items,
             "FORMAT_ITEM": render_copy_item("configFormat", "설정 JSON 형식 (AI에게 주고 설정을 만들게 할 때)", "설정 JSON 형식"),
@@ -8467,7 +8508,7 @@ _SCENARIO_PAGE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Unit Expert MCP · 서버 설정</title>
+  <title>Unit Expert MCP · MCP 서버 만들기</title>
   <style>
     __BASE_CSS__
     __NAV_CSS__
@@ -8500,17 +8541,30 @@ _SCENARIO_PAGE = """<!doctype html>
       gap: 20px;
       align-items: start;
     }
-    .options-col { display: grid; gap: 28px; min-width: 0; }
+    .options-col { display: grid; gap: 16px; min-width: 0; }
     .part { display: grid; gap: 10px; min-width: 0; }
-    .part[hidden] { display: none; }
-    .part-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-    .part-head h2 { margin: 0; font-size: 19px; display: flex; align-items: center; gap: 8px; }
-    .part-no {
-      display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
-      border-radius: 999px; background: var(--accent); color: #ffffff; font-size: 13px;
+    .basic-card { padding-bottom: 6px; }
+    .basic-card[hidden] { display: none; }
+    .basic-card h2 { margin: 0; font-size: 19px; }
+    .basic-card > .group-body > .opt { border-top: 0; padding-top: 10px; padding-bottom: 8px; }
+    /* The two folded parts: everything past the four basic settings. */
+    .fold { border: 1px solid var(--line); border-radius: 10px; background: #f6f7fa; min-width: 0; }
+    .fold[hidden] { display: none; }
+    .fold > summary {
+      padding: 14px 16px; cursor: pointer; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+      border-radius: 10px;
     }
-    .part.error-part .part-no { background: var(--danger); }
-    .part-desc { color: var(--muted); }
+    .fold-title { display: inline; margin: 0; font-size: 17px; }
+    /* A flex summary has no marker of its own. */
+    .fold > summary::before, .group > summary::before { content: "▸"; color: var(--muted); width: 12px; flex: none; }
+    .fold[open] > summary::before, .group[open] > summary::before { content: "▾"; }
+    .fold.error-fold .fold-title { color: var(--danger); }
+    .fold-count {
+      font-size: 12px; font-weight: 600; color: var(--muted); background: var(--surface);
+      border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; white-space: nowrap;
+    }
+    .fold-count.is-on { color: var(--changed); background: var(--changed-soft); border-color: var(--changed-line); }
+    .fold-body { display: grid; gap: 10px; padding: 0 12px 12px; min-width: 0; }
     .result-col {
       display: grid; gap: 10px; min-width: 0;
       position: sticky;
@@ -8527,8 +8581,8 @@ _SCENARIO_PAGE = """<!doctype html>
     .more > summary { cursor: pointer; font-weight: 700; font-size: 14px; }
     .more > summary .hint { font-weight: 400; margin-left: 6px; }
     .more-body { display: grid; gap: 14px; margin-top: 12px; }
-    .more-body h3 { margin: 6px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
     .load-row { display: grid; gap: 6px; }
+    .load-box .group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding-bottom: 14px; }
     .load-row button { justify-self: start; }
 
     .matrix { border-collapse: collapse; width: 100%; margin-top: 8px; table-layout: fixed; }
@@ -8575,9 +8629,6 @@ _SCENARIO_PAGE = """<!doctype html>
     .group-badge[hidden] { display: none; }
     .group > .group-body { padding: 0 16px 8px; }
     .group-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
-    .more-opts { grid-column: 1 / -1; border-top: 1px solid var(--line); padding: 8px 0; }
-    .more-opts[hidden] { display: none; }
-    .more-opts > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent-strong); }
     .group.danger-zone { border-color: #f0b4ad; }
     .group.danger-zone .group-title { color: var(--danger); }
     .danger-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
@@ -8592,7 +8643,10 @@ _SCENARIO_PAGE = """<!doctype html>
     .opt-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .opt-label { font-weight: 600; }
     .opt-desc { color: var(--muted); font-size: 13px; }
+    .opt-meta { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
     .opt-default { color: #7a8494; font-size: 12px; overflow-wrap: anywhere; }
+    .opt-help > summary { cursor: pointer; width: fit-content; font-size: 12px; font-weight: 600; color: var(--accent-strong); }
+    .opt-help ul { margin: 6px 0 2px; padding-left: 18px; display: grid; gap: 5px; font-size: 13px; color: var(--muted); }
     .opt-key { color: #8a93a1; font-size: 11px; background: none; border: 0; padding: 0; }
     .opt-range, .choice-desc { color: var(--muted); font-size: 12px; }
     .choice-desc:empty { display: none; }
@@ -8629,8 +8683,8 @@ _SCENARIO_PAGE = """<!doctype html>
     .chip-remove:hover { background: var(--changed-line); color: var(--text); }
     @media (max-width: 980px) {
       /* One column. The address card (address, copy, changed settings) stays
-         at the top of the window while the options scroll under it; "더 보기"
-         follows the options. */
+         at the top of the window while the options scroll under it; the other
+         copy forms follow the options. */
       .layout { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
       .result-col { display: contents; }
       .result-col .card { order: 2; }
@@ -8655,8 +8709,8 @@ _SCENARIO_PAGE = """<!doctype html>
   <main>
     <div class="page-head">
       <div>
-        <h1>서버 설정</h1>
-        <p class="lead">원하는 모양의 테스트용 MCP 서버를 만들고, 필요하면 일부러 에러를 내게 합니다.</p>
+        <h1>MCP 서버 만들기</h1>
+        <p class="lead">이름을 넣고 지원 스펙과 인증을 고르면, 그대로 동작하는 MCP 서버 주소가 만들어집니다.</p>
       </div>
       <div class="search-row">
         <label for="optionSearch">설정 찾기</label>
@@ -8671,25 +8725,57 @@ _SCENARIO_PAGE = """<!doctype html>
     __NOTICE__
     <div class="layout">
       <div class="options-col" id="optionsCol">
-        <section class="part" id="buildPart" aria-labelledby="buildTitle">
-          <div class="part-head">
-            <h2 id="buildTitle"><span class="part-no" aria-hidden="true">1</span>서버 만들기</h2>
-            <p class="part-desc">__BUILD_DESC__.</p>
+        <section class="part" id="basicPart" aria-labelledby="basicTitle">
+          <div class="card basic-card" id="basicCard">
+            <div class="group-head">
+              <h2 id="basicTitle">기본 설정</h2>
+              <span class="group-desc">이 네 가지만 정하면 됩니다. 그대로 두어도 바로 쓸 수 있습니다.</span>
+            </div>
+            <div class="group-body">__BASIC_ROWS__
+            </div>
           </div>
-          __BUILD_GROUPS__
+          <details class="group load-box" id="loadBox">
+            <summary>
+              <span class="group-title">설정 불러오기</span>
+              <span class="group-desc">가지고 있는 MCP 주소, 설정 코드, 설정 JSON을 붙여 넣으면 이 화면의 항목이 채워집니다</span>
+            </summary>
+            <div class="group-body">
+              <div class="load-row">
+                <label for="loadToken" class="hint">붙여 넣으면 바로 읽습니다. 직접 적었다면 "불러오기"를 누르세요.</label>
+                <textarea id="loadToken" rows="3" autocomplete="off" spellcheck="false" placeholder="MCP 주소, 설정 코드, 또는 설정 JSON을 붙여 넣으세요"></textarea>
+                <button type="button" class="secondary" id="loadTokenButton">불러오기</button>
+                <p id="loadError" class="error-text" role="alert"></p>
+                <p id="loadStatus" class="status-line" aria-live="polite"></p>
+              </div>
+              __FORMAT_ITEM__
+            </div>
+          </details>
         </section>
 
-        <section class="part error-part" id="errorPart" aria-labelledby="errorTitle">
-          <div class="part-head">
-            <h2 id="errorTitle"><span class="part-no" aria-hidden="true">2</span>에러 넣기</h2>
-            <p class="part-desc">__ERROR_DESC__.</p>
+        <details class="fold" id="advancedBox">
+          <summary>
+            <h2 class="fold-title" id="advancedTitle">자세한 설정</h2>
+            <span class="fold-count" id="advancedCount">기본값과 다른 설정 0개</span>
+            <span class="group-desc">요청 검증, 인증 범위, 툴 목록, 세션처럼 필요할 때만 바꾸는 설정입니다</span>
+          </summary>
+          <div class="fold-body">__ADVANCED_GROUPS__
           </div>
-          <section class="card" id="injectionCard" aria-labelledby="injectionTitle">
-            <h3 id="injectionTitle">자주 쓰는 에러</h3>
-            __INJECTIONS__
-          </section>
-          __ERROR_GROUPS__
-        </section>
+        </details>
+
+        <details class="fold error-fold" id="errorBox">
+          <summary>
+            <h2 class="fold-title" id="errorTitle">에러 넣기</h2>
+            <span class="fold-count" id="errorCount">켜진 것 0개</span>
+            <span class="group-desc">__ERROR_DESC__</span>
+          </summary>
+          <div class="fold-body">
+            <section class="card" id="injectionCard" aria-labelledby="injectionTitle">
+              <h3 id="injectionTitle">자주 쓰는 에러</h3>
+              __INJECTIONS__
+            </section>
+            __ERROR_GROUPS__
+          </div>
+        </details>
 
         <div class="aux">
           <details class="group compat" id="compatBox">
@@ -8723,7 +8809,7 @@ _SCENARIO_PAGE = """<!doctype html>
       <aside class="result-col" aria-label="내 MCP 서버 주소">
         <section class="card primary" id="resultCard" aria-labelledby="urlTitle">
           <h2 id="urlTitle"><label for="mcpUrl">내 MCP 서버 주소</label></h2>
-          <p class="card-desc">이 주소로 연결하면 왼쪽 설정대로 동작합니다.</p>
+          <p class="card-desc">이 주소를 MCP 클라이언트에 넣으면 지금 설정대로 동작합니다.</p>
           <div class="url-row">
             <input type="text" id="mcpUrl" readonly spellcheck="false" placeholder="오류를 고치면 주소가 만들어집니다">
             <button type="button" id="copyUrl" data-copy="url" data-copy-label="주소">주소 복사</button>
@@ -8732,31 +8818,23 @@ _SCENARIO_PAGE = """<!doctype html>
           <button type="button" class="link-button" id="urlErrorJump" hidden>오류가 난 곳으로 이동</button>
           <p id="copyStatus" class="status-line" aria-live="polite"></p>
           <div class="summary-head">
-            <h3 id="chipsTitle">바꾼 설정</h3>
+            <h3 id="chipsTitle">기본값에서 바꾼 설정</h3>
             <button type="button" class="secondary small" id="resetAll">모두 되돌리기</button>
           </div>
           <p id="chipsEmpty" class="hint">바꾼 설정이 없습니다. 기본 서버입니다.</p>
           <ul id="chips" class="chips" aria-labelledby="chipsTitle"></ul>
           <div class="result-actions">
-            <a class="button" id="inspectLink" href="/inspect">이 주소로 온 요청 보기</a>
-            <a class="button secondary" id="sendLink" href="/send">이 주소로 요청 보내 보기</a>
+            <a class="button secondary" id="sendLink" href="/send">MCP 클라이언트로 요청 보내 보기</a>
+            <a class="button secondary" id="inspectLink" href="/inspect">이 주소의 호출 기록 보기</a>
           </div>
         </section>
 
         <details class="card more" id="moreBox">
-          <summary>더 보기<span class="hint">curl · 설정 코드 · 테스트 명령 · 설정 불러오기</span></summary>
+          <summary>다른 형태로 복사<span class="hint">설정 JSON · 설정 코드 · 요청 헤더 · curl · 테스트 명령</span></summary>
           <div class="more-body">
             <p id="moreNote" class="hint" hidden></p>
             __COPY_ITEMS__
             <p class="hint">테스트 명령은 이 저장소의 루트에서 실행합니다.</p>
-            <h3 id="loadTitle"><label for="loadToken">설정 불러오기</label></h3>
-            <div class="load-row">
-              <textarea id="loadToken" rows="3" autocomplete="off" spellcheck="false" placeholder="MCP 주소, 설정 코드, 또는 설정 JSON을 붙여 넣으세요"></textarea>
-              <button type="button" class="secondary" id="loadTokenButton">불러오기</button>
-              <p id="loadError" class="error-text" role="alert"></p>
-              <p id="loadStatus" class="status-line" aria-live="polite"></p>
-            </div>
-            __FORMAT_ITEM__
           </div>
         </details>
       </aside>
@@ -8783,8 +8861,12 @@ _SCENARIO_PAGE_JS = r"""(function () {
   SCHEMA.forEach((option) => { OPTIONS[option.path] = option; });
   const PRESETS = {};
   META.presets.forEach((preset) => { PRESETS[preset.id] = preset; });
-  const GROUP_SECTION = {};
-  META.groups.forEach((group) => { GROUP_SECTION[group.id] = group.section; });
+  // The two folded parts of the page. Each shows how many of its options
+  // differ from the defaults and opens when that number becomes 1 or more.
+  const FOLDS = [
+    { tier: "advanced", box: "advancedBox", count: "advancedCount", text: (n) => "기본값과 다른 설정 " + n + "개" },
+    { tier: "error", box: "errorBox", count: "errorCount", text: (n) => "켜진 것 " + n + "개" }
+  ];
   const CONFIG_FORMAT = UI.configFormatText(SCHEMA, META.sections, location.origin);
   const GATEWAY_URL_SLOT = "<게이트웨이 MCP 주소>";
   const BLOCKED_TEXT = "오류를 고치면 만들어집니다.";
@@ -8812,6 +8894,8 @@ _SCENARIO_PAGE_JS = r"""(function () {
     validateSeq: 0,
     validateTimer: null,
     groupChanged: {},
+    // Whether each fold was open before a search started (null: no search).
+    foldsBeforeSearch: null,
     copyValues: {},
     errorPath: ""
   };
@@ -9072,15 +9156,30 @@ _SCENARIO_PAGE_JS = r"""(function () {
     badge.textContent = "바꿈 " + count;
   }
 
+  // "기본값과 다른 설정 N개" / "켜진 것 N개" on the two folds. A fold opens
+  // when its number first becomes 1 or more: a change made here, a preset, a
+  // pasted config or a #cfg address. The user may close it again.
+  function renderFolds(config) {
+    const counts = UI.changedCounts(config, SCHEMA);
+    FOLDS.forEach((fold) => {
+      const count = counts[fold.tier];
+      const label = byId(fold.count);
+      setText(fold.count, fold.text(count));
+      label.classList.toggle("is-on", count > 0);
+      const key = "fold:" + fold.tier;
+      if (count > 0 && !state.groupChanged[key]) byId(fold.box).open = true;
+      state.groupChanged[key] = count > 0;
+    });
+  }
+
   function renderOptions(config, errorPaths) {
     const changedByGroup = {};
-    const changedDetail = {};
     document.querySelectorAll(".opt").forEach((row) => {
       const option = OPTIONS[row.dataset.opt];
       const value = UI.getPath(config, option.path);
       const changed = !UI.deepEqual(value, option.default);
-      if (changed) changedByGroup[option.group] = (changedByGroup[option.group] || 0) + 1;
-      if (changed && option.detail) changedDetail[option.group] = (changedDetail[option.group] || 0) + 1;
+      // A basic option sits in the card at the top, not in its group.
+      if (changed && !option.basic) changedByGroup[option.group] = (changedByGroup[option.group] || 0) + 1;
       row.classList.toggle("is-changed", changed);
       row.classList.toggle("has-error", errorPaths.indexOf(option.path) >= 0);
       row.querySelector(".changed-mark").hidden = !changed;
@@ -9102,14 +9201,6 @@ _SCENARIO_PAGE_JS = r"""(function () {
       // Open a group when it first gets a change. The user may close it again.
       if (count > 0 && !state.groupChanged[group.dataset.group]) group.open = true;
       state.groupChanged[group.dataset.group] = count > 0;
-    });
-    // The rarely used options of a group ("세부 설정") open the same way.
-    document.querySelectorAll("[data-detail]").forEach((box) => {
-      const key = "detail:" + box.dataset.detail;
-      const count = changedDetail[box.dataset.detail] || 0;
-      setBadge(box.querySelector(".group-badge"), count);
-      if (count > 0 && !state.groupChanged[key]) box.open = true;
-      state.groupChanged[key] = count > 0;
     });
   }
 
@@ -9174,6 +9265,7 @@ _SCENARIO_PAGE_JS = r"""(function () {
     renderResult(config, token, blocked, pending);
     renderChips(config);
     renderOptions(config, list.map((entry) => entry.path));
+    renderFolds(config);
     renderErrors(list);
     if (!blocked && !pending) updateHash(token);
   }
@@ -9268,7 +9360,7 @@ _SCENARIO_PAGE_JS = r"""(function () {
   function revealOption(path) {
     const control = controlOf(path);
     if (!control) return;
-    // Open everything the control sits in: "세부 설정", then its group.
+    // Open everything the control sits in: its group, then the fold around it.
     let box = control.closest("details");
     while (box) {
       box.hidden = false;
@@ -9446,30 +9538,31 @@ _SCENARIO_PAGE_JS = r"""(function () {
     return words.every((word) => haystack.indexOf(word) >= 0);
   }
 
-  // The search covers every option row and the error buttons. A group with
-  // no match is hidden; one with a match is opened.
+  // The search covers every option row and the error buttons. A group or
+  // fold with no match is hidden; one with a match is opened. Clearing the
+  // search puts the folds back the way they were.
   function applySearch() {
     const query = byId("optionSearch").value.trim();
+    if (query && !state.foldsBeforeSearch) {
+      state.foldsBeforeSearch = {};
+      FOLDS.forEach((fold) => { state.foldsBeforeSearch[fold.tier] = Boolean(byId(fold.box).open); });
+    }
     let matches = 0;
-    const sectionMatches = { build: 0, error: 0 };
+    const tierMatches = { basic: 0, advanced: 0, error: 0 };
+    document.querySelectorAll(".opt").forEach((row) => {
+      const option = OPTIONS[row.dataset.opt];
+      const match = UI.matchOptionSearch(option, query);
+      row.hidden = !match;
+      if (!match) return;
+      matches += 1;
+      tierMatches[UI.optionTier(option)] += 1;
+    });
     document.querySelectorAll("[data-group]").forEach((group) => {
-      let groupMatches = 0;
-      group.querySelectorAll(".opt").forEach((row) => {
-        const match = UI.matchOptionSearch(OPTIONS[row.dataset.opt], query);
-        row.hidden = !match;
-        if (match) groupMatches += 1;
-      });
-      group.querySelectorAll("[data-detail]").forEach((box) => {
-        const inside = Array.from(box.querySelectorAll(".opt")).filter((row) => !row.hidden).length;
-        box.hidden = inside === 0;
-        box.open = query ? inside > 0 : Boolean(state.groupChanged["detail:" + box.dataset.detail]);
-      });
-      matches += groupMatches;
-      sectionMatches[GROUP_SECTION[group.dataset.group]] += groupMatches;
-      group.hidden = groupMatches === 0;
+      const inside = Array.from(group.querySelectorAll(".opt")).filter((row) => !row.hidden).length;
+      group.hidden = inside === 0;
       if (group.tagName === "DETAILS") {
         group.open = query
-          ? groupMatches > 0
+          ? inside > 0
           : Boolean(state.groupChanged[group.dataset.group]) || group.dataset.defaultOpen === "1";
       }
     });
@@ -9480,8 +9573,18 @@ _SCENARIO_PAGE_JS = r"""(function () {
       if (match) presetMatchCount += 1;
     });
     byId("injectionCard").hidden = presetMatchCount === 0;
-    byId("buildPart").hidden = sectionMatches.build === 0;
-    byId("errorPart").hidden = sectionMatches.error === 0 && presetMatchCount === 0;
+    byId("basicCard").hidden = tierMatches.basic === 0;
+    const inFold = { advanced: tierMatches.advanced, error: tierMatches.error + (query ? presetMatchCount : 0) };
+    FOLDS.forEach((fold) => {
+      const box = byId(fold.box);
+      box.hidden = Boolean(query) && inFold[fold.tier] === 0;
+      if (query) {
+        box.open = inFold[fold.tier] > 0;
+      } else if (state.foldsBeforeSearch) {
+        box.open = state.foldsBeforeSearch[fold.tier] || Boolean(state.groupChanged["fold:" + fold.tier]);
+      }
+    });
+    if (!query) state.foldsBeforeSearch = null;
     setText("searchCount", query ? "설정 " + matches + "개, 에러 버튼 " + presetMatchCount + "개" : "");
   }
 
@@ -9569,9 +9672,9 @@ _SCENARIO_PAGE_JS = r"""(function () {
   byId("urlErrorJump").addEventListener("click", () => {
     if (state.errorPath) revealOption(state.errorPath);
   });
-  // "더 보기" and the compatibility box are <details>: the browser opens them
-  // by mouse and by keyboard. Their copy texts get a height only then.
-  ["moreBox", "compatBox"].forEach((id) => { byId(id).addEventListener("toggle", syncExpandButtons); });
+  // These boxes are <details>: the browser opens them by mouse and by
+  // keyboard. The copy texts inside get a height only then.
+  ["moreBox", "compatBox", "loadBox"].forEach((id) => { byId(id).addEventListener("toggle", syncExpandButtons); });
   window.addEventListener("resize", syncExpandButtons);
   byId("loadTokenButton").addEventListener("click", () => loadToken(byId("loadToken").value, true));
   byId("loadToken").addEventListener("keydown", (event) => {
@@ -9628,10 +9731,14 @@ _SCENARIO_PAGE_JS = r"""(function () {
 # spec or imitates a failure. Every option takes the section of its group.
 CONFIG_OPTION_SECTIONS: tuple[dict[str, str], ...] = (
     {"id": "build", "label": "서버 만들기", "description": "정상 동작하는 MCP 서버의 모양을 정합니다"},
-    {"id": "error", "label": "에러 넣기", "description": "일부러 실패하거나 스펙을 어기게 합니다"},
+    {
+        "id": "error", "label": "에러 넣기",
+        "description": "켜면 서버가 일부러 실패하거나, 늦게 답하거나, 스펙에 어긋난 응답을 줍니다",
+    },
 )
 
-# ``open``: the group starts expanded on the screen (build groups are never folded).
+# ``open``: an error group starts expanded once "에러 넣기" is opened. Build
+# groups are cards inside "자세한 설정" and have no fold of their own.
 CONFIG_OPTION_GROUPS: tuple[dict[str, Any], ...] = (
     {"id": "basic", "section": "build", "open": True, "label": "기본 정보", "description": "서버와 서비스의 이름"},
     {
@@ -9689,16 +9796,88 @@ CONFIG_OPTION_EXCLUDED: dict[str, str] = {
 SERVER_ERA_LABELS = {"both": "둘 다", "legacy": "2025 방식만", "modern": "2026-07-28만"}
 REQUEST_MODE_LABELS = {"legacy": "2025 방식", "modern": "2026 방식"}
 SERVER_ERA_DESCRIPTIONS = {
-    "both": "2025 방식과 2026-07-28 요청을 모두 받습니다 (기본)",
-    "legacy": "initialize로 시작하는 2025 방식 요청만 압니다",
-    "modern": "요청마다 버전을 싣는 2026-07-28 요청만 받습니다",
+    "both": (
+        "2025 방식(initialize로 시작하고 세션 ID를 받음)과 2026-07-28 방식(세션 없이 요청마다 버전을 실음) "
+        "요청을 모두 받습니다. 잘 모르겠으면 이것을 고르세요"
+    ),
+    "legacy": (
+        "모든 요청을 2025 방식으로 처리합니다. 2026-07-28에서 생긴 server/discover는 "
+        "모르는 메서드(에러 -32601)로 답합니다"
+    ),
+    "modern": (
+        "2026-07-28 방식 요청만 받습니다. initialize 같은 2025 방식 요청은 "
+        "HTTP 400, 에러 -32022로 거절합니다"
+    ),
 }
-AUTH_MODE_LABELS = {"off": "없음", "oauth": "OAuth, 모든 요청", "mixed-oauth": "OAuth, 고른 툴만"}
+AUTH_MODE_LABELS = {"off": "끔", "oauth": "모든 요청에 토큰", "mixed-oauth": "일부 툴만 토큰"}
 AUTH_MODE_DESCRIPTIONS = {
-    "off": "토큰 없이 씁니다 (기본)",
-    "oauth": "모든 요청에 Bearer 토큰이 필요하고, 없으면 401을 줍니다",
-    "mixed-oauth": "보호할 툴을 부를 때만 Bearer 토큰이 필요합니다",
+    "off": "토큰을 확인하지 않습니다. 누구나 바로 쓸 수 있습니다",
+    "oauth": "/mcp로 오는 모든 요청에 Bearer 토큰이 있어야 합니다. 없거나 틀리면 HTTP 401을 줍니다",
+    "mixed-oauth": (
+        "'보호할 툴'을 호출할 때만 Bearer 토큰이 있어야 합니다. "
+        "연결, 툴 목록, 다른 툴 호출은 토큰 없이 됩니다"
+    ),
 }
+# "자세히" lines of an option (``help`` in /scenario/meta). Each line says what
+# the server does; keep them in step with the code they describe.
+# serverEra: request_era(), handle_mcp_exchange(), do_GET / do_DELETE.
+SERVER_ERA_HELP = (
+    "어느 방식인지는 요청마다 따로 봅니다. Mcp-Method 헤더가 있거나 바디의 params._meta에 "
+    f"{META_PROTOCOL_VERSION}이 있으면 2026-07-28 방식, 둘 다 없으면 2025 방식입니다.",
+    "MCP-Protocol-Version 헤더가 2025 이하 버전이면 Mcp-Method 헤더가 있어도 2025 방식으로 봅니다.",
+    "2025 방식만: 2026-07-28 방식 표시가 있어도 무시합니다. 이때 줄 응답은 에러 넣기의 "
+    "'2025 방식 서버가 2026-07-28 요청을 받았을 때'에서 바꿀 수 있습니다.",
+    "2026-07-28만: id가 없는 알림은 거절하지 않습니다. DELETE /mcp에는 HTTP 405를 주고, "
+    "엄격 검증이 켜져 있으면 GET /mcp에도 HTTP 405를 줍니다.",
+)
+# strict2026: validate_modern_request(), handle_modern_request(),
+# validate_mcp_param_headers() against validate_2026_request(), handle_json_rpc_2026().
+STRICT_2026_HELP = (
+    "검사하는 것은 2026-07-28 방식 요청뿐입니다. 2025 방식 요청은 켜든 끄든 똑같이 처리합니다.",
+    "필수 헤더: MCP-Protocol-Version과 Mcp-Method가 있어야 하고, tools/call에는 Mcp-Name도 있어야 합니다. "
+    f"없으면 HTTP 400, 에러 {ERR_HEADER_MISMATCH}.",
+    "헤더와 바디 일치: MCP-Protocol-Version은 _meta의 protocolVersion과, Mcp-Method는 바디의 method와, "
+    f"Mcp-Name은 params.name과 같아야 합니다. 다르면 HTTP 400, 에러 {ERR_HEADER_MISMATCH}. "
+    f"Mcp-Name이 {BASE64_SENTINEL_PREFIX}…{BASE64_SENTINEL_SUFFIX} 형식이면 풀어서 비교합니다.",
+    f"_meta 필수 값: params._meta에 {META_PROTOCOL_VERSION}(문자열)과 "
+    f"{META_CLIENT_CAPABILITIES}(객체)가 있어야 합니다. 없으면 HTTP 400, 에러 {ERR_INVALID_PARAMS}.",
+    f"버전: {PROTOCOL_VERSION_2026}이 아니면 HTTP 400, 에러 {ERR_UNSUPPORTED_VERSION}. "
+    "에러의 data에 지원하는 버전과 요청한 버전을 넣어 줍니다.",
+    "헤더 중복: MCP-Protocol-Version, Mcp-Method, Mcp-Name, Mcp-Param-* 헤더가 두 번 오면 "
+    f"값이 같아도 HTTP 400, 에러 {ERR_HEADER_MISMATCH}.",
+    f"요청 id: 문자열이나 정수가 아니면 HTTP 400, 에러 {ERR_INVALID_REQUEST}.",
+    "툴 인자 헤더: 툴이 헤더로도 받겠다고 정한 인자(테스트 툴 echo_header_params의 인자)는 "
+    "Mcp-Param-* 헤더가 있어야 하고 바디의 값과 같아야 합니다. "
+    f"어기면 HTTP 400, 에러 {ERR_HEADER_MISMATCH}.",
+    "메서드와 툴: 모르는 메서드와 2026-07-28에서 없어진 initialize, ping에는 "
+    f"HTTP 404, 에러 {ERR_METHOD_NOT_FOUND}을 줍니다. 모르는 툴 호출에는 에러 {ERR_INVALID_PARAMS}를 줍니다.",
+    "끄면 통과되는 것: MCP-Protocol-Version 헤더가 없는 요청, 2025 이하 버전을 적은 요청, 중복 헤더, "
+    "문자열·정수가 아닌 id. Mcp-Param-* 헤더는 보지 않습니다. initialize와 ping에는 성공으로 답하고, "
+    f"모르는 메서드에는 HTTP 200에 에러 {ERR_METHOD_NOT_FOUND}, 모르는 툴에는 isError 결과를 줍니다.",
+    "꺼도 검사하는 것: Mcp-Method와 Mcp-Name 헤더가 있는지, 바디와 같은지, "
+    "MCP-Protocol-Version 헤더가 있다면 _meta와 같은지, _meta에 protocolVersion과 clientCapabilities가 있는지.",
+    "끄면 2026-07-28 방식에서 적용되지 않는 설정: 테스트 툴 보이기, 한 페이지의 툴 수, 서버 정보 캐시, "
+    "클라이언트가 선언해야 하는 기능, 에러 넣기의 server/discover와 응답 형식 깨기.",
+)
+# allowedOrigins: Handler.reject_origin(), called for POST / GET / DELETE on /mcp.
+ALLOWED_ORIGINS_HELP = (
+    "Origin은 웹 페이지가 서버로 요청을 보낼 때 브라우저가 자동으로 붙이는 헤더입니다. "
+    "그 페이지 주소의 앞부분(예: https://app.example.com)이 들어갑니다.",
+    "비워 두면 검사하지 않습니다. 어느 출발지에서 온 요청이든 받습니다.",
+    "적어 두면 /mcp로 온 POST, GET, DELETE 요청의 Origin 헤더를 목록과 글자 그대로 비교합니다. "
+    f"목록에 없으면 HTTP 403과 JSON-RPC 에러 {ERR_INVALID_REQUEST}(id 없음)을 줍니다.",
+    "Origin 헤더가 없는 요청(curl, 서버끼리 보내는 요청 등)은 목록을 적어 두어도 통과합니다.",
+    "브라우저가 먼저 보내는 OPTIONS 요청은 검사하지 않습니다.",
+    "쉼표로 구분해 적습니다. 예: https://app.example.com, http://localhost:3000",
+)
+# auth.mode: Handler.enforce_auth(), send_auth_challenge().
+AUTH_MODE_HELP = (
+    "토큰은 요청의 Authorization: Bearer <토큰> 헤더에서 읽습니다.",
+    "토큰은 이 서버가 직접 발급합니다. HTTP 401 응답의 WWW-Authenticate 헤더가 알려 주는 주소"
+    "(/.well-known/oauth-protected-resource)에서 시작해 OAuth 로그인을 거치면 받습니다.",
+    "'일부 툴만 토큰'에서 어느 툴을 보호할지는 자세한 설정의 '보호할 툴'에 적습니다. "
+    "기본은 convert_로 시작하는 툴 5개입니다.",
+)
 SERVER_HTTP_STATUS_DESCRIPTIONS = {
     200: "막지 않음 (기본)",
     401: "401 Unauthorized로 답함",
@@ -9806,7 +9985,11 @@ def config_option_schema() -> list[dict[str, Any]]:
     ``dependsOn`` is a condition on another option ("in": allowed values, or
     "min": lowest value) without which this option has no effect.
     ``strictOnly`` marks options that are ignored when strict2026 is off.
-    ``detail`` marks a rarely used option the screen keeps under "세부 설정".
+    ``detail`` marks a rarely used option (the screen no longer folds these
+    apart; every build option that is not ``basic`` is under "자세한 설정").
+    ``basic`` marks the options the screen always shows at the top ("기본 설정").
+    ``help`` is a list of lines the screen shows under "자세히": what exactly
+    the server checks or answers. ``description`` stays the one-line summary.
     """
     delay_max = MAX_INJECTED_DELAY_SECONDS
     strict = {"strictOnly": True}
@@ -9816,176 +9999,213 @@ def config_option_schema() -> list[dict[str, Any]]:
         # -- basic ----------------------------------------------------------
         _option(
             "mcp.identifier", "basic", "string", "서버 이름",
-            "서버가 자기를 소개할 때 쓰는 이름입니다",
-            maxLength=128,
+            "클라이언트가 서버 정보를 물으면 이 이름으로 답합니다",
+            maxLength=128, basic=True,
+            help=[
+                "2025 방식에서는 initialize 응답의 serverInfo.name에 들어갑니다.",
+                "2026-07-28 방식에서는 성공 응답의 _meta에 있는 serverInfo의 name에 들어갑니다"
+                "(엄격 검증을 끄면 server/discover 결과의 serverInfo에만 들어갑니다).",
+            ],
         ),
         _option(
             "mcp.serviceName", "basic", "string", "서비스 이름",
-            "툴 설명에 들어가는 서비스 이름입니다",
-            maxLength=200,
+            "툴 목록의 각 툴 설명 앞에 이 이름이 붙습니다",
+            maxLength=200, basic=True,
         ),
         # -- protocol -------------------------------------------------------
         _option(
             "serverEra", "protocol", "enum", "지원 스펙",
-            "서버가 어떤 MCP 요청을 받을지 고릅니다",
+            "서버가 어떤 방식의 MCP 요청을 받을지 고릅니다",
             choices=_choices(
                 {era: SERVER_ERA_DESCRIPTIONS[era] for era in SERVER_ERAS}, SERVER_ERA_LABELS
             ),
+            basic=True, help=list(SERVER_ERA_HELP),
         ),
         _option(
             "strict2026", "protocol", "bool", "엄격 검증",
-            "2026-07-28 요청을 스펙대로 꼼꼼히 검사합니다",
-            "modern",
+            "켜면 2026-07-28 방식 요청의 헤더와 바디를 스펙대로 검사하고, 어긋난 요청을 HTTP 400으로 거절합니다",
+            "modern", help=list(STRICT_2026_HELP),
         ),
         _option(
             "initialize.protocolVersionEnabled", "protocol", "bool", "initialize 응답 버전 고정",
-            "켜면 아래 버전으로 답하고, 끄면 클라이언트가 요청한 버전으로 답합니다",
+            "켜면 initialize에 항상 아래 버전으로 답하고, 끄면 클라이언트가 요청한 버전으로 답합니다",
             "legacy",
+            help=[
+                "끈 상태에서 클라이언트가 요청한 버전을 서버가 모르면 "
+                f"{LATEST_LEGACY_PROTOCOL_VERSION}로 답합니다.",
+            ],
         ),
         _option(
             "initialize.protocolVersion", "protocol", "string", "initialize 응답 버전",
-            "initialize 응답에 넣는 protocolVersion 값입니다",
+            "initialize 응답의 protocolVersion에 이 값을 그대로 넣습니다",
             "legacy",
             depends_on=_when("initialize.protocolVersionEnabled", True),
             suggestions=[
                 {"value": version, "description": text} for version, text in PROTOCOL_VERSION_CHOICES
             ],
+            help=[
+                "클라이언트가 지원하지 않는 버전을 넣으면, 클라이언트가 연결을 끊는지 확인할 수 있습니다.",
+            ],
         ),
         _option(
             "modern.requiredClientCapabilities", "protocol", "list", "클라이언트가 선언해야 하는 기능",
-            "요청이 이 기능을 선언하지 않으면 400(-32021)으로 거절합니다",
+            "고른 기능을 요청이 선언하지 않으면 HTTP 400, 에러 -32021로 거절합니다",
             "modern",
             choices=[{"value": name, "description": name} for name in CLIENT_CAPABILITY_NAMES],
+            help=[
+                "2026-07-28 방식 요청의 _meta에 있는 clientCapabilities에서 찾습니다.",
+                "tools/list와 tools/call 요청에서 검사합니다. server/discover는 검사하지 않습니다.",
+                "에러의 data.requiredCapabilities에 빠진 기능 이름이 들어갑니다.",
+            ],
             **strict, **detail,
         ),
         _option(
             "modern.invalidParamsHttpStatus", "protocol", "enum", "잘못된 인자(-32602)의 HTTP 상태",
-            "모르는 툴이나 잘못된 커서에 답할 때의 HTTP 상태입니다",
+            "모르는 툴 호출이나 잘못된 커서에 에러 -32602로 답할 때 함께 주는 HTTP 상태를 고릅니다",
             "modern", choices=_choices(INVALID_PARAMS_HTTP_STATUS_DESCRIPTIONS), **strict, **detail,
         ),
         _option(
             "modern.rejectUnexpectedParamHeader", "protocol", "bool", "남는 Mcp-Param 헤더 거절",
-            "바디에 없는 값을 가리키는 Mcp-Param-* 헤더가 오면 400(-32020)으로 거절합니다",
+            "켜면 바디에 값이 없는 인자의 Mcp-Param-* 헤더가 왔을 때 HTTP 400, 에러 -32020으로 거절하고, 끄면 그 헤더를 무시합니다",
             "modern", **strict, **detail,
         ),
         # -- auth -----------------------------------------------------------
         _option(
-            "auth.mode", "auth", "enum", "인증 방식",
-            "Bearer 토큰을 어디까지 요구할지 고릅니다",
+            "auth.mode", "auth", "enum", "인증",
+            "요청에 Bearer 토큰을 어디까지 요구할지 고릅니다",
             choices=_choices({mode: AUTH_MODE_DESCRIPTIONS[mode] for mode in AUTH_MODES}, AUTH_MODE_LABELS),
+            basic=True, help=list(AUTH_MODE_HELP),
         ),
         _option(
             "auth.protectedTools", "auth", "list", "보호할 툴",
-            "토큰이 있어야 부를 수 있는 툴 이름입니다",
+            "여기 적은 툴을 토큰 없이 호출하면 HTTP 401을 줍니다",
             depends_on=_when("auth.mode", "mixed-oauth"),
+            help=[
+                "툴 이름을 쉼표로 구분해 적습니다. 적지 않은 툴과 initialize, tools/list는 토큰 없이 됩니다.",
+            ],
         ),
         _option(
             "auth.enforceScope", "auth", "bool", "스코프 검사",
-            "토큰에 mcp 스코프가 없으면 403을 줍니다",
+            f"켜면 토큰은 맞지만 {OAUTH_SCOPE} 스코프가 없는 요청에 HTTP 403(insufficient_scope)을 줍니다",
             depends_on=_when("auth.mode", "oauth", "mixed-oauth"),
+            help=["끄면 토큰이 맞기만 하면 스코프를 보지 않고 통과시킵니다."],
         ),
         _option(
             "allowedOrigins", "auth", "list", "허용할 Origin",
-            "적어 두면 목록에 없는 Origin의 요청을 403으로 막습니다",
-            maxItems=50, **detail,
+            "브라우저가 요청에 붙이는 출발지 주소(Origin 헤더)를 적어 두면, 목록에 없는 출발지에서 온 요청을 HTTP 403으로 거절합니다",
+            maxItems=50, help=list(ALLOWED_ORIGINS_HELP), **detail,
         ),
         # -- tools ----------------------------------------------------------
         _option(
             "modern.testTools", "tools", "bool", "테스트 툴 보이기",
-            f"툴 목록에 테스트용 툴({', '.join(MODERN_TEST_TOOL_NAMES)})을 더합니다",
-            "modern", **strict,
+            f"켜면 2026-07-28 방식의 툴 목록에 테스트용 툴({', '.join(MODERN_TEST_TOOL_NAMES)})을 더합니다",
+            "modern",
+            help=[
+                "끄면 이 툴들은 목록에 없고, 호출하면 모르는 툴(에러 -32602)로 답합니다.",
+                "2025 방식의 툴 목록에는 켜도 나오지 않습니다.",
+            ],
+            **strict,
         ),
         _option(
             "toolsList.pageSize", "tools", "int", "한 페이지의 툴 수",
-            "0이면 한 번에 다 주고, 1 이상이면 그 수만큼 나눠 줍니다",
+            "1 이상이면 툴 목록을 그 수만큼 나눠 주고 다음 페이지용 nextCursor를 붙입니다. 0이면 한 번에 다 줍니다",
             low=0, high=100,
+            help=[
+                "클라이언트는 받은 nextCursor를 다음 tools/list의 cursor에 넣어 이어서 받습니다.",
+                "서버가 준 적 없는 cursor가 오면 에러 -32602(Invalid cursor)를 줍니다.",
+            ],
         ),
         _option(
             "toolsList.cacheTtlMs", "tools", "int", "툴 목록 캐시 시간(ms)",
-            "클라이언트가 툴 목록을 다시 묻지 않아도 되는 시간입니다",
+            "툴 목록 응답의 ttlMs에 이 값을 넣습니다. 클라이언트는 그 시간 동안 목록을 다시 묻지 않아도 됩니다",
             "modern", low=0, high=3_600_000,
         ),
         _option(
             "toolsList.cacheScope", "tools", "enum", "툴 목록 캐시 범위",
-            "툴 목록 캐시를 누구와 함께 쓸지 정합니다",
+            "툴 목록 응답의 cacheScope에 이 값을 넣습니다. 캐시한 목록을 누구와 함께 써도 되는지 알려 줍니다",
             "modern", choices=_choices(CACHE_SCOPE_DESCRIPTIONS),
         ),
         _option(
             "discover.cacheTtlMs", "tools", "int", "서버 정보 캐시 시간(ms)",
-            "클라이언트가 server/discover를 다시 묻지 않아도 되는 시간입니다",
+            "server/discover 응답의 ttlMs에 이 값을 넣습니다. 클라이언트는 그 시간 동안 서버 정보를 다시 묻지 않아도 됩니다",
             "modern", low=0, high=86_400_000, **strict, **detail,
         ),
         _option(
             "discover.cacheScope", "tools", "enum", "서버 정보 캐시 범위",
-            "server/discover 캐시를 누구와 함께 쓸지 정합니다",
+            "server/discover 응답의 cacheScope에 이 값을 넣습니다",
             "modern", choices=_choices(CACHE_SCOPE_DESCRIPTIONS), **strict, **detail,
         ),
         # -- session --------------------------------------------------------
         _option(
             "session.issueId", "session", "bool", "세션 ID 주기",
-            "initialize 응답에 Mcp-Session-Id를 붙입니다",
+            "켜면 initialize 응답에 Mcp-Session-Id 헤더로 새 세션 ID를 줍니다. 끄면 주지 않습니다",
             "legacy",
         ),
         _option(
             "session.validate", "session", "bool", "세션 검사",
-            "세션 ID가 없는 요청에 400, 모르는 세션에 404를 줍니다",
+            "켜면 initialize가 아닌 요청에 세션 ID가 없을 때 HTTP 400, 서버가 준 적 없거나 끝난 세션 ID일 때 HTTP 404를 줍니다",
             "legacy", depends_on=_when("session.issueId", True),
+            help=[
+                "요청의 Mcp-Session-Id 헤더를 봅니다. 끄면 세션 ID를 주기만 하고 확인하지 않습니다.",
+                "켜면 DELETE /mcp로 세션을 끝낼 수 있고, 끝난 세션 ID로 온 요청은 HTTP 404를 받습니다.",
+                "두 경우 모두 바디는 JSON-RPC 에러 -32600입니다.",
+            ],
         ),
         # == error: break the spec or imitate a failure ======================
         # -- tools/call -----------------------------------------------------
         _option(
             "toolCall.mode", "errToolCall", "enum", "tools/call 응답",
-            "툴 호출에 줄 응답을 고릅니다",
+            "툴 호출에 정상 결과 대신 고른 응답을 줍니다",
             choices=_choices(TOOL_CALL_MODES),
         ),
         _option(
             "toolCall.errorCode", "errToolCall", "int", "tools/call 에러 코드",
-            "JSON-RPC 에러로 답할 때 쓰는 코드입니다",
+            "JSON-RPC 에러로 답할 때 error.code에 이 값을 넣습니다",
             low=-32768, high=32767,
             depends_on=_when("toolCall.mode", "json-rpc-error"),
         ),
         _option(
             "toolCall.httpStatus", "errToolCall", "int", "tools/call HTTP 상태",
-            "HTTP 에러로 답할 때 쓰는 상태 코드입니다",
+            "HTTP 에러로 답할 때 이 상태 코드를 씁니다",
             low=400, high=599,
             depends_on=_when("toolCall.mode", "http-status"),
         ),
         _option(
             "toolCall.sseNotificationCount", "errToolCall", "int", "tools/call SSE 알림 수",
-            "SSE로 답할 때 최종 응답 앞에 보내는 알림 수입니다",
+            "SSE로 답할 때 최종 응답 앞에 알림을 이 수만큼 먼저 보냅니다",
             low=0, high=20,
             depends_on=_when("toolCall.mode", "sse"),
         ),
         _option(
             "toolCall.delaySeconds", "errToolCall", "float", "tools/call 늦게 답하기(초)",
-            "툴 호출에 이 시간만큼 늦게 답합니다",
+            "0보다 크면 툴 호출에 그 시간만큼 기다렸다가 답합니다",
             low=0, high=delay_max,
         ),
         _option(
             "toolCall.targetTools", "errToolCall", "list", "tools/call 적용할 툴",
-            "적은 툴에만 적용하고, 비우면 모든 툴에 적용합니다",
+            "툴 이름을 적으면 그 툴을 호출할 때만 위 설정을 적용하고, 비우면 모든 툴에 적용합니다",
             maxItems=50,
         ),
         # -- tools/list -----------------------------------------------------
         _option(
             "toolsList.mode", "errToolsList", "enum", "tools/list 응답",
-            "툴 목록 요청에 줄 응답을 고릅니다",
+            "툴 목록 요청에 정상 목록 대신 고른 응답을 줍니다",
             choices=_choices(TOOLS_LIST_MODES),
         ),
         _option(
             "toolsList.tooManyCount", "errToolsList", "int", "툴 개수",
-            "툴을 많이 줄 때의 개수입니다",
+            "툴을 많이 줄 때 tool_0부터 이 개수만큼 만들어 줍니다",
             low=1, high=100,
             depends_on=_when("toolsList.mode", "too-many"),
         ),
         _option(
             "toolsList.duplicateToolName", "errToolsList", "bool", "같은 이름의 툴 넣기",
-            "이름이 같은 툴 두 개를 목록에 넣습니다",
+            "켜면 이름이 같은 툴 두 개가 든 목록을 줍니다",
             depends_on=_when("toolsList.mode", "normal", "too-many"),
         ),
         _option(
             "toolErrors", "errToolsList", "list", "잘못된 툴 정의",
-            "고른 문제를 가진 툴로 목록을 바꿉니다",
+            "고르면 정상 툴 대신 그 문제를 가진 툴이 든 목록을 줍니다",
             choices=[
                 {
                     "value": name,
@@ -9998,83 +10218,83 @@ def config_option_schema() -> list[dict[str, Any]]:
         ),
         _option(
             "toolsList.failAtPage", "errToolsList", "int", "실패할 페이지",
-            "나눠 줄 때 이 번째 페이지 요청에 에러를 줍니다(0이면 끔)",
+            "1 이상이면 툴 목록을 나눠 줄 때 그 번째 페이지 요청에 JSON-RPC 에러 -32603을 줍니다. 0이면 끕니다",
             low=0, high=100,
             depends_on={"path": "toolsList.pageSize", "min": 1},
         ),
         # -- every request --------------------------------------------------
         _option(
             "server.httpStatus", "errAll", "enum", "요청 막기",
-            "요청을 처리하지 않고 401이나 403으로 답합니다",
+            "401이나 403을 고르면 요청을 처리하지 않고 그 HTTP 상태로 답합니다",
             choices=_choices(SERVER_HTTP_STATUS_DESCRIPTIONS),
         ),
         _option(
             "server.target", "errAll", "enum", "막을 요청",
-            "어떤 요청을 막을지 고릅니다",
+            "위에서 고른 상태로 어떤 요청을 막을지 고릅니다",
             choices=_choices(SERVER_TARGET_DESCRIPTIONS),
             depends_on=_when("server.httpStatus", 401, 403),
         ),
         _option(
             "customHeader.enabled", "errAll", "bool", "X-Mock-Auth 헤더 검사",
-            "X-Mock-Auth 헤더가 없으면 401, 값이 allow가 아니면 403을 줍니다",
+            "켜면 요청에 X-Mock-Auth 헤더가 없을 때 HTTP 401, 값이 allow가 아닐 때 HTTP 403을 줍니다",
         ),
         _option(
             "server.delayEnabled", "errAll", "bool", "모든 응답 늦추기",
-            "모든 요청에 아래 시간만큼 늦게 답합니다",
+            "켜면 모든 요청에 아래 시간만큼 기다렸다가 답합니다",
         ),
         _option(
             "server.delaySeconds", "errAll", "float", "늦출 시간(초)",
-            "모든 응답을 늦추는 시간입니다",
+            "모든 응답 늦추기를 켰을 때 기다리는 시간입니다",
             low=0, high=30,
             depends_on=_when("server.delayEnabled", True),
         ),
         # -- server/discover (2026) -----------------------------------------
         _option(
             "discover.mode", "errDiscover", "enum", "server/discover 응답",
-            "서버 정보 요청에 줄 응답을 고릅니다",
+            "서버 정보 요청(server/discover)에 정상 결과 대신 고른 응답을 줍니다",
             "modern", choices=_choices(DISCOVER_MODES), **strict,
         ),
         _option(
             "discover.errorCode", "errDiscover", "int", "discover 에러 코드",
-            "JSON-RPC 에러로 답할 때 쓰는 코드입니다",
+            "JSON-RPC 에러로 답할 때 error.code에 이 값을 넣습니다",
             "modern", low=-32768, high=32767,
             depends_on=_when("discover.mode", "json-rpc-error"), **strict,
         ),
         _option(
             "discover.httpStatus", "errDiscover", "int", "discover HTTP 상태",
-            "HTTP 5xx로 답할 때 쓰는 상태 코드입니다",
+            "HTTP 5xx로 답할 때 이 상태 코드를 씁니다",
             "modern", low=500, high=599,
             depends_on=_when("discover.mode", "http-5xx"), **strict,
         ),
         _option(
             "discover.delaySeconds", "errDiscover", "float", "discover 늦게 답하기(초)",
-            "서버 정보 요청에 이 시간만큼 늦게 답합니다",
+            "0보다 크면 서버 정보 요청에 그 시간만큼 기다렸다가 답합니다",
             "modern", low=0, high=delay_max, **strict,
         ),
         # -- broken response shape (2026) -----------------------------------
         _option(
             "modernResponse.resultType", "errModernResponse", "enum", "resultType 바꾸기",
-            "성공 응답의 resultType을 빼거나 다른 값으로 바꿉니다",
+            "성공 응답의 resultType을 빼거나 고른 값으로 바꿉니다",
             "modern", choices=_choices(MODERN_RESULT_TYPE_MODES), **strict,
         ),
         _option(
             "modernResponse.omitServerInfo", "errModernResponse", "bool", "serverInfo 빼기",
-            "응답의 _meta에서 serverInfo를 뺍니다",
+            "켜면 성공 응답의 _meta에서 serverInfo를 뺍니다",
             "modern", **strict,
         ),
         _option(
             "modernResponse.omitCacheFields", "errModernResponse", "bool", "캐시 값 빼기",
-            "응답에서 ttlMs와 cacheScope를 뺍니다",
+            "켜면 성공 응답에서 ttlMs와 cacheScope를 뺍니다",
             "modern", **strict,
         ),
         _option(
             "modernResponse.issueSessionId", "errModernResponse", "bool", "세션 ID 붙이기",
-            "2026-07-28 응답에 없어야 할 Mcp-Session-Id 헤더를 붙입니다",
+            "켜면 2026-07-28 응답에 없어야 할 Mcp-Session-Id 헤더를 붙입니다",
             "modern", **strict,
         ),
         _option(
             "modernResponse.methods", "errModernResponse", "list", "형식을 깰 메서드",
-            "고른 메서드의 응답만 바꾸고, 비우면 모두 바꿉니다",
+            "고른 메서드의 응답에만 위 설정을 적용하고, 비우면 세 메서드 모두에 적용합니다",
             "modern",
             choices=[{"value": name, "description": name} for name in MODERN_RESULT_METHODS],
             **strict,
@@ -10082,20 +10302,20 @@ def config_option_schema() -> list[dict[str, Any]]:
         # -- a 2025-only server that gets a 2026 request --------------------
         _option(
             "legacyModernProbe.mode", "errLegacyProbe", "enum", "2026-07-28 요청에 줄 응답",
-            "2025 방식만 아는 서버가 2026-07-28 요청에 답하는 방식을 고릅니다",
+            "지원 스펙이 '2025 방식만'인 서버에 2026-07-28 방식 요청이 왔을 때 줄 응답을 고릅니다",
             "legacy", choices=_choices(LEGACY_MODERN_PROBE_MODES),
             depends_on=_when("serverEra", "legacy"),
         ),
         _option(
             "legacyModernProbe.delaySeconds", "errLegacyProbe", "float", "답하지 않을 시간(초)",
-            "응답 없이 버티는 시간입니다",
+            "답 없이 이 시간만큼 기다린 뒤 연결을 끊습니다",
             "legacy", low=0, high=delay_max,
             depends_on=_when("legacyModernProbe.mode", "timeout"),
         ),
         # -- raw responses --------------------------------------------------
         _option(
             "rawResponses", "errRaw", "json", "직접 지정한 응답",
-            "메서드별로 적어 둔 응답을 다른 설정보다 먼저 그대로 줍니다",
+            "규칙을 적으면 그 메서드의 요청에 다른 설정과 검사를 모두 건너뛰고 적어 둔 응답을 그대로 줍니다",
             maxItems=RAW_RESPONSE_MAX_RULES,
             itemFields=["enabled", "method", "status", "headers", "contentType", "body"],
         ),

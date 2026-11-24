@@ -401,8 +401,8 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 | 키 | 내용 |
 |---|---|
 | `defaults` | `DEFAULT_CONFIG` 전체 |
-| `sections` | 화면의 두 부분. 항목은 `id`, `label`, `description`. `build`(서버 만들기: 스펙을 지키는 서버가 가질 수 있는 설정), `error`(에러 넣기: 스펙을 어기거나 실패를 흉내 내는 설정) |
-| `groups` | 순서 있는 그룹 목록. 항목은 `id`, `section`, `open`(화면에서 처음부터 펼쳐 두는지), `label`, `description`. `build`: `basic`(기본 정보), `protocol`(지원 스펙), `auth`(인증), `tools`(툴), `session`(세션). `error`: `errToolCall`(tools/call), `errToolsList`(tools/list), `errAll`(모든 요청), `errDiscover`(server/discover), `errModernResponse`(응답 형식 깨기), `errLegacyProbe`(2025 방식 서버가 2026-07-28 요청을 받았을 때), `errRaw`(직접 응답 지정) |
+| `sections` | 옵션의 두 갈래. 항목은 `id`, `label`, `description`. `build`(서버 만들기: 스펙을 지키는 서버가 가질 수 있는 설정), `error`(에러 넣기: 스펙을 어기거나 실패를 흉내 내는 설정). MCP 서버 만들기 화면은 `build` 가운데 `basic`인 옵션을 "기본 설정"에 항상 펼쳐 두고, 나머지 `build`는 "자세한 설정", `error`는 "에러 넣기"에 접어 둔다 |
+| `groups` | 순서 있는 그룹 목록. 항목은 `id`, `section`, `open`(`error` 그룹을 "에러 넣기" 안에서 처음부터 펼쳐 두는지. `build` 그룹은 "자세한 설정" 안의 카드라 따로 접히지 않는다), `label`, `description`. `build`: `basic`(기본 정보), `protocol`(지원 스펙), `auth`(인증), `tools`(툴), `session`(세션). `error`: `errToolCall`(tools/call), `errToolsList`(tools/list), `errAll`(모든 요청), `errDiscover`(server/discover), `errModernResponse`(응답 형식 깨기), `errLegacyProbe`(2025 방식 서버가 2026-07-28 요청을 받았을 때), `errRaw`(직접 응답 지정) |
 | `options` | 화면에서 바꿀 수 있는 옵션 목록(그룹 순서). 항목 형식은 아래 표 |
 | `excluded` | `options`에 넣지 않은 `DEFAULT_CONFIG` 키와 이유: `protocolEra`, `rejectLegacy`, `customHeader.name`, `customHeader.value` |
 | `presets` | 미리 만들어 둔 부분 설정. 항목은 `id`, `label`, `description`, `category`, `section`, `patch`(기본 설정에 병합할 부분 설정). `section`은 `patch`가 `error` 옵션을 하나라도 바꾸면 `error`, 아니면 `build`다. 화면의 "자주 쓰는 에러" 버튼은 `error`인 것만 보여 준다 |
@@ -415,7 +415,9 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 | 필드 | 내용 |
 |---|---|
 | `path` | 설정 경로. 예: `toolCall.mode` |
-| `label`, `description` | 짧은 이름과 한 줄 설명 |
+| `label`, `description` | 짧은 이름과 한 줄 설명. 설명은 켜거나 값을 넣으면 어떤 요청이 어떻게 처리되는지를 적는다 |
+| `help` | 화면이 "자세히"로 접어 보여 주는 문자열 목록(검사 항목, 어겼을 때의 응답, 예시). 한 줄에 하나씩이고 줄바꿈이 없다. 더 적을 것이 없는 옵션에는 이 키가 없다. `serverEra`, `strict2026`, `allowedOrigins`, `auth.mode`, `session.validate` 등에 있다 |
+| `basic` | `true`면 화면 맨 위 "기본 설정"에 항상 보이는 옵션: `mcp.identifier`, `mcp.serviceName`, `serverEra`, `auth.mode`. 그 밖의 옵션에는 이 키가 없다 |
 | `kind` | `bool`, `enum`, `int`, `float`, `string`, `list`, `json` |
 | `choices` | 고를 수 있는 값 목록 `[{value, description}]`, 없으면 `null`. `enum`에는 항상 있고, 항목이 정해진 `list`(`toolErrors`, `modernResponse.methods`, `modern.requiredClientCapabilities`)에도 있다. `serverEra`, `auth.mode`, `toolErrors`의 항목에는 화면에 보일 이름 `label`도 있다 |
 | `min`, `max` | `int`, `float`의 허용 범위. 그 밖에는 `null` |
@@ -425,7 +427,7 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 | `dependsOn` | 이 조건일 때만 효과가 있다. `{"path": "<다른 옵션>", "in": [<값>...]}` 또는 `{"path": "<다른 옵션>", "min": <최솟값>}`. 조건이 없으면 `null` |
 | `default` | 기본값 |
 | `strictOnly` | `true`면 `strict2026`이 꺼졌을 때 적용되지 않는 옵션(`discover.*`, `modernResponse.*`, `modern.*`). 그 밖의 옵션에는 이 키가 없다 |
-| `detail` | `true`면 드물게 쓰는 옵션. 화면은 그룹 안의 "세부 설정"에 접어 둔다. 그 밖의 옵션에는 이 키가 없다 |
+| `detail` | `true`면 드물게 쓰는 옵션. 화면은 이 값으로 따로 접지 않는다(`basic`이 아닌 `build` 옵션은 모두 "자세한 설정"에 있다). 그 밖의 옵션에는 이 키가 없다 |
 | `maxLength`, `maxItems`, `suggestions`, `itemFields` | 일부 옵션에만 있는 보조 정보. `suggestions`는 자유 입력 문자열(`initialize.protocolVersion`)의 추천값 |
 
 `presets`의 `category`:
@@ -465,7 +467,7 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 | `query` | 요청 URL의 쿼리 문자열. 없으면 빈 문자열. 인증 값인 파라미터는 값이 `***`다(아래 "인증 값 가리기") |
 | `cfg` | 요청 URL의 `cfg` 토큰. 없거나 빈 값이면 `null` |
 | `configSource` | 그 요청의 설정이 어디서 왔는지. `url`(`cfg` 쿼리), `header`(`X-MCP-Test-Scenario`), `global`(활성 설정) |
-| `source` | 요청 헤더 `X-Unit-Expert-Source`의 값. 없으면 `null`. 화면이 보내는 값은 `inspect-console`(`/send` 요청 보내기 화면)이다. `/inspect` 화면은 이 값이 있는 요청을 모두 "요청 보내기 화면에서 보낸 요청"으로 다룬다 |
+| `source` | 요청 헤더 `X-Unit-Expert-Source`의 값. 없으면 `null`. 화면이 보내는 값은 `inspect-console`(`/send` MCP 클라이언트 화면)이다. `/inspect` 화면은 이 값이 있는 요청을 모두 "MCP 클라이언트 화면에서 보낸 요청"으로 다룬다 |
 | `era` | 요청이 모던(`2026`)인지 레거시(`2025`)인지 |
 | `method` | JSON-RPC 메서드. 바디가 없거나 읽지 못했으면 `null` |
 | `requestHeaders` | `Accept`, `Content-Type`, `Authorization`과 `Mcp-`·`X-Mcp-`로 시작하는 헤더. 인증 값은 가려서 넣는다(아래 "인증 값 가리기") |

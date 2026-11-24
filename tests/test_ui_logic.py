@@ -1268,6 +1268,31 @@ class ConfigPasteTest(UiCoreTestCase):
                 self.assertTrue(parsed["error"].startswith(expected), parsed["error"])
         self.assertEqual(self.call("unknownConfigPaths", {"rawResponses": [{"anything": 1}], "mcp": {"identifier": "x"}}, self.defaults), [])
 
+    def test_option_tiers_and_changed_counts(self) -> None:
+        tiers = {path: self.call("optionTier", option) for path, option in self.options.items()}
+        self.assertEqual(
+            [path for path, tier in tiers.items() if tier == "basic"],
+            ["mcp.identifier", "mcp.serviceName", "serverEra", "auth.mode"],
+        )
+        for path, option in self.options.items():
+            if tiers[path] != "basic":
+                self.assertEqual(tiers[path], "advanced" if option["section"] == "build" else "error", path)
+        zero = {"basic": 0, "advanced": 0, "error": 0}
+        self.assertEqual(self.call("changedCounts", self.defaults, self.schema), zero)
+        cases = (
+            ({"serverEra": "legacy", "mcp": {"identifier": "x"}}, {**zero, "basic": 2}),
+            ({"strict2026": False, "allowedOrigins": ["https://a.example"], "session": {"validate": True}},
+             {**zero, "advanced": 3}),
+            ({"toolCall": {"mode": "sse"}, "rawResponses": [{"method": "ping", "status": 200}]}, {**zero, "error": 2}),
+            ({"auth": {"mode": "oauth", "enforceScope": True}, "server": {"httpStatus": 401}},
+             {"basic": 1, "advanced": 1, "error": 1}),
+        )
+        for patch, expected in cases:
+            with self.subTest(patch=patch):
+                self.assertEqual(self.call("changedCounts", merged(patch), self.schema), expected)
+        # A config field the form has no control for is not counted.
+        self.assertEqual(self.call("changedCounts", merged({"protocolEra": "2026"}), self.schema), zero)
+
     def test_the_format_text_lists_every_option_by_section(self) -> None:
         text = self.call("configFormatText", self.schema, self.meta["sections"], "http://h:1/")
         self.assertIn("GET http://h:1/scenario/meta", text)

@@ -45,6 +45,7 @@ from unit_expert_mcp.server import (
     encode_config_token,
     get_active_config,
     get_active_scenario,
+    handle_json_rpc,
     header_scenario_patches,
     normalize_config,
     preset_config,
@@ -171,6 +172,68 @@ class OptionSchemaTest(unittest.TestCase):
                     for choice in option["choices"]:
                         self.assertLessEqual({"value", "description"}, set(choice))
                         self.assertTrue(str(choice["description"]).strip())
+
+    def test_basic_marks_the_four_settings_the_screen_starts_with(self) -> None:
+        basic = [option["path"] for option in self.options if option.get("basic")]
+        self.assertEqual(basic, ["mcp.identifier", "mcp.serviceName", "serverEra", "auth.mode"])
+        for option in self.options:
+            with self.subTest(path=option["path"]):
+                # The key is there only when true, and only on build options.
+                self.assertIn(option.get("basic"), (None, True))
+                if option.get("basic"):
+                    self.assertEqual(option["section"], "build")
+                    self.assertIsNone(option["dependsOn"])
+                    self.assertEqual(option["appliesTo"], "both")
+
+    def test_help_is_a_list_of_plain_lines(self) -> None:
+        for option in self.options:
+            if "help" not in option:
+                continue
+            with self.subTest(path=option["path"]):
+                self.assertIsInstance(option["help"], list)
+                self.assertTrue(option["help"])
+                for line in option["help"]:
+                    self.assertIsInstance(line, str)
+                    self.assertTrue(line.strip())
+                    self.assertNotIn("\n", line)
+        for path in ("serverEra", "auth.mode", "strict2026", "allowedOrigins", "session.validate"):
+            self.assertIn("help", self.by_path[path], path)
+
+    def test_strict_help_names_the_codes_the_server_answers_with(self) -> None:
+        """The lines quote what validate_modern_request answers; a request that
+        breaks each rule is checked against the same code here."""
+        text = "\n".join(self.by_path["strict2026"]["help"])
+        meta = {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
+        headers = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"}
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": meta}}
+
+        def answer(strict: bool, payload: dict, request_headers: dict) -> tuple[int, int | None]:
+            status, _, reply = handle_json_rpc(payload, config={"strict2026": strict}, headers=request_headers)
+            return status, (reply.get("error") or {}).get("code")
+
+        self.assertEqual(answer(True, body, headers), (200, None))
+        without_version = {"Mcp-Method": "tools/list"}
+        no_meta_version = {**body, "params": {"_meta": {"io.modelcontextprotocol/clientCapabilities": {}}}}
+        other_method = {**headers, "Mcp-Method": "tools/call"}
+        ping = {**body, "method": "ping"}
+        ping_headers = {**headers, "Mcp-Method": "ping"}
+        cases = (
+            ("필수 헤더", body, without_version, (400, -32020), (200, None)),
+            ("헤더와 바디 일치", body, other_method, (400, -32020), (400, -32020)),
+            ("_meta 필수 값", no_meta_version, headers, (400, -32602), (400, -32602)),
+            ("요청 id", {**body, "id": 1.5}, headers, (400, -32600), (200, None)),
+            ("메서드와 툴", ping, ping_headers, (404, -32601), (200, None)),
+        )
+        for title, payload, request_headers, strict_answer, lenient_answer in cases:
+            with self.subTest(title=title):
+                self.assertIn(title + ":", text)
+                self.assertEqual(answer(True, payload, request_headers), strict_answer)
+                self.assertEqual(answer(False, payload, request_headers), lenient_answer)
+        for code in ("-32020", "-32602", "-32022", "-32600", "-32601", "HTTP 400", "HTTP 404"):
+            self.assertIn(code, text)
 
     def test_defaults_match_their_kind(self) -> None:
         types = {"bool": bool, "int": int, "float": float, "string": str, "list": list, "json": list}
