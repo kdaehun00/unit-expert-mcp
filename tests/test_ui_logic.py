@@ -1233,7 +1233,7 @@ class RequestPasteTest(UiCoreTestCase):
 
 
 class ConfigPasteTest(UiCoreTestCase):
-    """"설정 불러오기": an address, a config code or a config JSON."""
+    """"주소로 불러오기": an address, a config code or a config JSON."""
 
     def test_text_that_is_not_json_is_an_address_or_a_code(self) -> None:
         for text in ("eyJhIjoxfQ", "http://h/mcp?cfg=eyJhIjoxfQ", "X-MCP-Test-Scenario: cfg:eyJhIjoxfQ"):
@@ -1267,6 +1267,25 @@ class ConfigPasteTest(UiCoreTestCase):
                 self.assertFalse(parsed["ok"])
                 self.assertTrue(parsed["error"].startswith(expected), parsed["error"])
         self.assertEqual(self.call("unknownConfigPaths", {"rawResponses": [{"anything": 1}], "mcp": {"identifier": "x"}}, self.defaults), [])
+
+    def test_an_mcp_address_without_a_config(self) -> None:
+        cases = (
+            ("https://mcp.example.com/mcp", True),
+            (" http://localhost:8000/mcp/ ", True),
+            ("/mcp", True),
+            ("https://h.example/prefix/mcp?x=1#top", True),
+            ("https://mcp.example.com/mcp?cfg=abc", False),
+            ("/mcp?x=1&cfg=abc", False),
+            ("https://www.example.com/docs", False),
+            ("https://www.example.com", False),
+            ("https://www.example.com/mcp-docs", False),
+            ("eyJ0b29sQ2FsbCI6e319", False),
+            ("cfg:eyJ0b29sQ2FsbCI6e319", False),
+            ('{"toolCall": {}}', False),
+            ("", False),
+        )
+        results = self.run_calls([["isPlainMcpAddress", text] for text, _ in cases])
+        self.assertEqual([result["value"] for result in results], [expected for _, expected in cases])
 
     def test_option_tiers_and_changed_counts(self) -> None:
         tiers = {path: self.call("optionTier", option) for path, option in self.options.items()}

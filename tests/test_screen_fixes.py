@@ -404,21 +404,20 @@ class PageWordingTest(unittest.TestCase):
     def test_load_token_and_copy_wording(self) -> None:
         dom = parse(self.scenario)
         self.assertEqual(
-            dom.by_id("loadToken")["attrs"]["placeholder"], "MCP 주소, 설정 코드, 또는 설정 JSON을 붙여 넣으세요"
+            dom.by_id("loadToken")["attrs"]["placeholder"], "MCP 주소를 붙여 넣으세요 (예: https://…/mcp?cfg=…)"
         )
-        self.assertEqual(dom.by_id("loadToken")["tag"], "textarea")
+        self.assertEqual(dom.by_id("loadToken")["tag"], "input")
         self.assertIn('"복사했습니다: " + label', self.scenario)
         self.assertNotIn("을(를)", self.scenario)
         self.assertNotIn("오른쪽", self.scenario)
-        # Everything but the address is under "다른 형태로 복사", each with what it copies.
-        folded = dom.by_id("moreBox")["text"]
-        for label in ("다른 형태로 복사", "설정 코드", "요청 헤더로", "테스트 명령", "curl", "설정 JSON"):
-            self.assertIn(label, folded)
-        # Pasting a config is under the basic settings, with the format to give an AI.
-        load = dom.by_id("loadBox")["text"]
-        for label in ("설정 불러오기", "불러오기", "설정 JSON 형식"):
-            self.assertIn(label, load)
-        self.assertNotIn("설정 불러오기", folded)
+        # Everything but the address is in "다른 형태로 복사", each with what it copies,
+        # and the format to give an AI is there too.
+        part = dom.by_id("copyPart")["text"]
+        for label in ("다른 형태로 복사", "설정 코드", "요청 헤더로", "테스트 명령", "curl", "설정 JSON", "설정 JSON 형식"):
+            self.assertIn(label, part)
+        # The one place a config is put in is "주소로 불러오기" at the top.
+        self.assertIn("주소로 불러오기", dom.by_id("loadCard")["text"])
+        self.assertNotIn("설정 불러오기", self.scenario.split("<script>")[0])
 
     def test_inspect_page_holds_what_the_server_keeps(self) -> None:
         size = INSPECT_LOG.maxlen

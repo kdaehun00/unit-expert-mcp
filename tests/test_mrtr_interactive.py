@@ -349,8 +349,8 @@ class ConvertInteractiveTest(unittest.TestCase):
         self.assertEqual(tool["inputSchema"]["required"], ["value", "from_unit"])
         self.assertNotIn("to_unit", tool["inputSchema"]["properties"])
         self.assertIs(tool["annotations"]["readOnlyHint"], True)
-        for word in ("Call 1", "Call 2", "Call 3"):
-            self.assertIn(word, tool["description"].replace("call", "Call"))
+        for phrase in ("has not said which unit", "target unit", "decimal places"):
+            self.assertIn(phrase, tool["description"])
         for listing in (hidden, legacy):
             self.assertNotIn(INTERACTIVE_TOOL, [tool["name"] for tool in listing["result"]["tools"]])
 

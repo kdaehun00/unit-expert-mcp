@@ -401,8 +401,8 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 | 키 | 내용 |
 |---|---|
 | `defaults` | `DEFAULT_CONFIG` 전체 |
-| `sections` | 옵션의 두 갈래. 항목은 `id`, `label`, `description`. `build`(서버 만들기: 스펙을 지키는 서버가 가질 수 있는 설정), `error`(에러 넣기: 스펙을 어기거나 실패를 흉내 내는 설정). MCP 서버 만들기 화면은 `build` 가운데 `basic`인 옵션을 "기본 설정"에 항상 펼쳐 두고, 나머지 `build`는 "자세한 설정", `error`는 "에러 넣기"에 접어 둔다 |
-| `groups` | 순서 있는 그룹 목록. 항목은 `id`, `section`, `open`(`error` 그룹을 "에러 넣기" 안에서 처음부터 펼쳐 두는지. `build` 그룹은 "자세한 설정" 안의 카드라 따로 접히지 않는다), `label`, `description`. `build`: `basic`(기본 정보), `protocol`(지원 스펙), `auth`(인증), `tools`(툴), `session`(세션). `error`: `errToolCall`(tools/call), `errToolsList`(tools/list), `errAll`(모든 요청), `errDiscover`(server/discover), `errModernResponse`(응답 형식 깨기), `errLegacyProbe`(2025 방식 서버가 2026-07-28 요청을 받았을 때), `errRaw`(직접 응답 지정) |
+| `sections` | 옵션의 두 갈래. 항목은 `id`, `label`, `description`. `build`(서버 만들기: 스펙을 지키는 서버가 가질 수 있는 설정), `error`(에러 넣기: 스펙을 어기거나 실패를 흉내 내는 설정). MCP 서버 만들기 화면은 `build` 가운데 `basic`인 옵션을 "기본 설정"에, 나머지 `build`는 "자세한 설정"에, `error`는 "에러 넣기"에 둔다. 세 구역 모두 접히지 않고 처음부터 보인다 |
+| `groups` | 순서 있는 그룹 목록. 항목은 `id`, `section`, `open`(예전 화면이 그룹을 처음부터 펼쳐 둘지 정하던 값. 지금 화면은 모든 그룹을 펼쳐 보여 주므로 읽지 않는다), `label`, `description`. `build`: `basic`(기본 정보), `protocol`(지원 스펙), `auth`(인증), `tools`(툴), `session`(세션). `error`: `errToolCall`(tools/call), `errToolsList`(tools/list), `errAll`(모든 요청), `errDiscover`(server/discover), `errModernResponse`(응답 형식 깨기), `errLegacyProbe`(2025 방식 서버가 2026-07-28 요청을 받았을 때), `errRaw`(직접 응답 지정) |
 | `options` | 화면에서 바꿀 수 있는 옵션 목록(그룹 순서). 항목 형식은 아래 표 |
 | `excluded` | `options`에 넣지 않은 `DEFAULT_CONFIG` 키와 이유: `protocolEra`, `rejectLegacy`, `customHeader.name`, `customHeader.value` |
 | `presets` | 미리 만들어 둔 부분 설정. 항목은 `id`, `label`, `description`, `category`, `section`, `patch`(기본 설정에 병합할 부분 설정). `section`은 `patch`가 `error` 옵션을 하나라도 바꾸면 `error`, 아니면 `build`다. 화면의 "자주 쓰는 에러" 버튼은 `error`인 것만 보여 준다 |
@@ -416,7 +416,7 @@ README 표에 있는 기존 시나리오 이름에 더해 아래 이름을 쓸 �
 |---|---|
 | `path` | 설정 경로. 예: `toolCall.mode` |
 | `label`, `description` | 짧은 이름과 한 줄 설명. 설명은 켜거나 값을 넣으면 어떤 요청이 어떻게 처리되는지를 적는다 |
-| `help` | 화면이 "자세히"로 접어 보여 주는 문자열 목록(검사 항목, 어겼을 때의 응답, 예시). 한 줄에 하나씩이고 줄바꿈이 없다. 더 적을 것이 없는 옵션에는 이 키가 없다. `serverEra`, `strict2026`, `allowedOrigins`, `auth.mode`, `session.validate` 등에 있다 |
+| `help` | 화면이 한 줄 설명 아래에 목록으로 보여 주는 문자열 목록(검사 항목, 어겼을 때의 응답, 예시). 한 줄에 하나씩이고 줄바꿈이 없다. 더 적을 것이 없는 옵션에는 이 키가 없다. `serverEra`, `strict2026`, `allowedOrigins`, `auth.mode`, `session.validate` 등에 있다 |
 | `basic` | `true`면 화면 맨 위 "기본 설정"에 항상 보이는 옵션: `mcp.identifier`, `mcp.serviceName`, `serverEra`, `auth.mode`. 그 밖의 옵션에는 이 키가 없다 |
 | `kind` | `bool`, `enum`, `int`, `float`, `string`, `list`, `json` |
 | `choices` | 고를 수 있는 값 목록 `[{value, description}]`, 없으면 `null`. `enum`에는 항상 있고, 항목이 정해진 `list`(`toolErrors`, `modernResponse.methods`, `modern.requiredClientCapabilities`)에도 있다. `serverEra`, `auth.mode`, `toolErrors`의 항목에는 화면에 보일 이름 `label`도 있다 |

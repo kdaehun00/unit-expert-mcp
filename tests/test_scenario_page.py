@@ -159,11 +159,9 @@ class ScenarioPageStructureTest(unittest.TestCase):
                     self.assertIn(str(choice["description"]), row_text)
 
     def rows_in(self, element_id: str) -> list[str]:
-        """Option paths of the rows inside one element, in page order."""
+        """Option paths of the rows inside one part, in page order."""
         start = self.page.index(f'id="{element_id}"')
-        ends = {
-            "basicCard": 'id="loadBox"', "advancedBox": 'id="errorBox"', "errorBox": 'id="compatBox"',
-        }
+        ends = {"basicPart": 'id="advancedPart"', "advancedPart": 'id="errorPart"', "errorPart": 'id="copyPart"'}
         end = self.page.index(ends[element_id], start)
         return [
             element["attrs"]["data-opt"]
@@ -172,9 +170,7 @@ class ScenarioPageStructureTest(unittest.TestCase):
         ]
 
     def test_groups_follow_the_meta_order(self) -> None:
-        groups = [
-            element for element in self.dom.by_tag("section", "details") if "data-group" in element["attrs"]
-        ]
+        groups = [element for element in self.dom.elements if "data-group" in element["attrs"]]
         # A group whose options are all basic ("기본 정보") has no card of its own.
         left = {option["group"] for option in self.meta["options"] if not option.get("basic")}
         expected = [group for group in self.meta["groups"] if group["id"] in left]
@@ -183,19 +179,22 @@ class ScenarioPageStructureTest(unittest.TestCase):
         for group, element in zip(expected, groups):
             with self.subTest(group=group["id"]):
                 self.assertIn(group["label"], element["text"])
-                # A build group is a plain card inside "자세한 설정". An error
-                # group folds, and the ones marked open start expanded.
-                self.assertEqual(element["tag"], "section" if group["section"] == "build" else "details")
-                self.assertEqual("open" in element["attrs"], group["section"] == "error" and group["open"])
+                # Every group, build or error, is a plain card: nothing to open.
+                self.assertEqual(element["tag"], "section")
 
-    def test_the_page_reads_basic_then_advanced_then_errors(self) -> None:
-        """Top-down: the four basic settings (always in view), pasting a
-        config, the folded rest of the build options, the folded errors, then
-        the 2026-07-28 compatibility matrix and the server-wide defaults."""
-        names = ("basicCard", "loadBox", "advancedBox", "errorBox", "injectionCard", "compatBox", "dangerZone")
+    def test_the_page_reads_address_then_basic_then_advanced_then_errors(self) -> None:
+        """Top-down: the address to load a config from, the jumps, the four
+        basic settings, the rest of the build options, the errors, the other
+        copy forms, the 2026-07-28 compatibility matrix and the server-wide
+        defaults."""
+        names = ("loadCard", "toc", "basicPart", "advancedPart", "errorPart", "injectionCard", "copyPart",
+                 "compatPart", "dangerZone")
         order = [self.page.index(f'id="{name}"') for name in names]
         self.assertEqual(order, sorted(order))
-        basic, advanced, error = (self.rows_in(name) for name in ("basicCard", "advancedBox", "errorBox"))
+        # The address field comes before the two columns, right under the title.
+        self.assertLess(self.page.index('id="loadCard"'), self.page.index('class="layout"'))
+        self.assertLess(self.page.index("<h1>"), self.page.index('id="loadCard"'))
+        basic, advanced, error = (self.rows_in(name) for name in ("basicPart", "advancedPart", "errorPart"))
         self.assertEqual(basic, ["mcp.identifier", "mcp.serviceName", "serverEra", "auth.mode"])
         self.assertEqual(basic, [option["path"] for option in self.meta["options"] if option.get("basic")])
         self.assertEqual(
@@ -206,27 +205,60 @@ class ScenarioPageStructureTest(unittest.TestCase):
         for path in ("strict2026", "allowedOrigins", "toolsList.pageSize", "session.validate", "auth.protectedTools"):
             self.assertIn(path, advanced)
         # The matrix is in none of the three.
-        for name in ("basicCard", "advancedBox", "errorBox"):
+        for name in ("basicPart", "advancedPart", "errorPart"):
             self.assertNotIn("matrix-cell", self.dom.by_id(name)["text"])
-        self.assertIn("2026-07-28 호환 테스트", self.dom.by_id("compatBox")["text"])
+        self.assertIn("2026-07-28 호환 테스트", self.dom.by_id("compatPart")["text"])
 
-    def test_only_the_basic_settings_start_in_view(self) -> None:
-        self.assertEqual(self.dom.by_id("basicCard")["tag"], "div")
-        self.assertIn("기본 설정", self.dom.by_id("basicCard")["text"])
-        for name, title, count in (
-            ("advancedBox", "자세한 설정", "기본값과 다른 설정 0개"),
-            ("errorBox", "에러 넣기", "켜진 것 0개"),
+    def test_every_setting_is_in_view_without_a_click(self) -> None:
+        # The only thing that folds is the server-wide (dangerous) box.
+        self.assertEqual([e["attrs"].get("id") for e in self.dom.by_tag("details")], ["dangerZone"])
+        self.assertEqual(self.dom.by_tag("summary")[0]["text"].split()[0], "서버")
+        visible = self.dom.by_tag("main")[0]["text"]
+        for word in ("전체 보기", "자세히", "세부 설정", "더 보기", "펼치"):
+            with self.subTest(word=word):
+                self.assertNotIn(word, visible)
+        self.assertEqual([e for e in self.dom.elements if "data-expand" in e["attrs"]], [])
+        self.assertNotIn("syncExpandButtons", self.page)
+        for name, title, count_id, count in (
+            ("advancedPart", "자세한 설정", "advancedCount", "기본값과 다른 설정 0개"),
+            ("errorPart", "에러 넣기", "errorCount", "켜진 것 0개"),
         ):
             with self.subTest(name=name):
-                box = self.dom.by_id(name)
-                self.assertEqual(box["tag"], "details")
-                self.assertNotIn("open", box["attrs"])
-                self.assertIn(title, box["text"])
-                self.assertIn(count, box["text"])
-        self.assertEqual(self.dom.by_id("advancedCount")["text"], "기본값과 다른 설정 0개")
-        self.assertEqual(self.dom.by_id("errorCount")["text"], "켜진 것 0개")
-        # No fold inside a fold for the build options.
-        self.assertNotIn("세부 설정", self.page)
+                part = self.dom.by_id(name)
+                self.assertEqual(part["tag"], "section")
+                self.assertIn(title, part["text"])
+                self.assertEqual(self.dom.by_id(count_id)["text"], count)
+        # No row is rendered hidden.
+        for element in self.dom.elements:
+            if "data-opt" in element["attrs"] or "data-group" in element["attrs"]:
+                self.assertNotIn("hidden", element["attrs"])
+
+    def test_the_jumps_name_every_part(self) -> None:
+        nav = self.dom.by_id("toc")
+        self.assertEqual(nav["tag"], "nav")
+        jumps = [e for e in self.dom.by_tag("button") if "data-jump" in e["attrs"]]
+        self.assertEqual(
+            [(e["attrs"]["data-jump"], e["text"]) for e in jumps],
+            [("basicPart", "기본 설정"), ("advancedPart", "자세한 설정"), ("errorPart", "에러 넣기"),
+             ("copyPart", "다른 형태로 복사"), ("compatPart", "호환 테스트"), ("dangerZone", "서버 기본값 바꾸기")],
+        )
+        for element in jumps:
+            self.dom.by_id(element["attrs"]["data-jump"])
+        # Buttons, not #links: the address hash carries #cfg.
+        self.assertNotIn('href="#', self.page)
+
+    def test_the_address_to_load_from_is_one_field_at_the_top(self) -> None:
+        card = self.dom.by_id("loadCard")
+        self.assertEqual(card["tag"], "section")
+        for text in ("주소로 불러오기", "가지고 있는 MCP 주소를 넣으면 그 주소의 설정이 아래에 채워집니다", "불러오기"):
+            self.assertIn(text, card["text"])
+        field = self.dom.by_id("loadToken")
+        self.assertEqual((field["tag"], field["attrs"]["type"]), ("input", "text"))
+        self.assertNotIn("readonly", field["attrs"])
+        self.assertEqual(self.dom.by_tag("textarea")[0]["attrs"]["data-config-path"], "rawResponses")
+        # It is not the address the page makes: the two are named apart.
+        self.assertEqual(self.dom.by_id("urlTitle")["text"], "만들어진 주소")
+        self.assertNotIn("내 MCP 서버 주소", self.page)
 
     def test_choices_of_the_basic_selects_are_explained_one_line_each(self) -> None:
         rows = {e["attrs"]["data-opt"]: e for e in self.dom.elements if "data-opt" in e["attrs"]}
@@ -248,20 +280,18 @@ class ScenarioPageStructureTest(unittest.TestCase):
     def test_strict_and_origin_say_what_they_check(self) -> None:
         rows = {e["attrs"]["data-opt"]: e for e in self.dom.elements if "data-opt" in e["attrs"]}
         strict = rows["strict2026"]["text"]
-        for text in ("자세히", "필수 헤더", "헤더와 바디 일치", "_meta 필수 값", "HTTP 400", "-32020", "-32602",
+        for text in ("필수 헤더", "헤더와 바디 일치", "_meta 필수 값", "HTTP 400", "-32020", "-32602",
                      "-32022", "끄면 통과되는 것", "꺼도 검사하는 것"):
             with self.subTest(option="strict2026", text=text):
                 self.assertIn(text, strict)
         origin = rows["allowedOrigins"]["text"]
-        for text in ("자세히", "브라우저가 요청에 붙이는 출발지 주소", "HTTP 403", "비워 두면 검사하지 않습니다",
+        for text in ("브라우저가 요청에 붙이는 출발지 주소", "HTTP 403", "비워 두면 검사하지 않습니다",
                      "Origin 헤더가 없는 요청(curl", "https://app.example.com"):
             with self.subTest(option="allowedOrigins", text=text):
                 self.assertIn(text, origin)
-        # "자세히" is a <details> the browser folds: closed until asked for.
-        helps = [e for e in self.dom.by_tag("details") if e["attrs"].get("class") == "opt-help"]
+        # The lines are a plain list under the control, in view without a click.
+        helps = [e for e in self.dom.by_tag("ul") if e["attrs"].get("class") == "opt-help"]
         self.assertEqual(len(helps), len([o for o in self.meta["options"] if o.get("help")]))
-        for element in helps:
-            self.assertNotIn("open", element["attrs"])
 
     def test_every_preset_has_a_button(self) -> None:
         buttons = {
@@ -355,27 +385,28 @@ class ScenarioPageStructureTest(unittest.TestCase):
         self.assertNotIn("시나리오별 설명", self.page)
 
     def test_danger_zone_is_collapsed_and_last(self) -> None:
-        column = [element for element in self.dom.by_tag("details") if element["attrs"].get("id") != "moreBox"]
+        column = self.dom.by_tag("details")
         self.assertEqual(column[-1]["attrs"].get("id"), "dangerZone")
-        for element_id in ("dangerZone", "compatBox", "moreBox", "loadBox"):
-            self.assertNotIn("open", self.dom.by_id(element_id)["attrs"])
+        self.assertNotIn("open", self.dom.by_id("dangerZone")["attrs"])
+        self.assertLess(self.page.index('id="compatPart"'), self.page.index('id="dangerZone"'))
         danger = column[-1]["text"]
         for text in ("지금 설정을 서버 기본값으로", "서버 기본값 되돌리기", "세션 모두 끊기", "모든 사용자에게 적용"):
             self.assertIn(text, danger)
 
     def test_the_address_panel_says_what_it_is_and_what_each_button_copies(self) -> None:
         card = self.dom.by_id("resultCard")["text"]
-        for text in ("내 MCP 서버 주소", "이 주소를 MCP 클라이언트에 넣으면 지금 설정대로 동작합니다.", "주소 복사",
+        for text in ("만들어진 주소", "이 주소를 MCP 클라이언트에 넣으면 지금 설정대로 동작합니다.", "주소 복사",
                      "기본값에서 바꾼 설정", "모두 되돌리기", "이 주소의 호출 기록 보기", "MCP 클라이언트로 요청 보내 보기"):
             self.assertIn(text, card)
         # The address is the one filled button of the card; the links are secondary.
         self.assertEqual(self.dom.by_id("copyUrl")["attrs"].get("class"), None)
         for link in ("sendLink", "inspectLink"):
             self.assertEqual(self.dom.by_id(link)["attrs"]["class"], "button secondary")
-        # Everything else is under "다른 형태로 복사", a <details> the browser opens by
-        # mouse and by keyboard. Each copy button sits with the text it copies.
-        more = self.dom.by_id("moreBox")
-        self.assertEqual(more["tag"], "details")
+        # The card holds the address only. Everything else that can be copied
+        # is in "다른 형태로 복사", in view; each button sits with the whole text it copies.
+        self.assertEqual(len([e for e in self.dom.by_tag("section", "details") if e["attrs"].get("id") in
+                              {"resultCard", "copyBox"}]), 1)
+        self.assertEqual(self.dom.by_id("copyBox")["tag"], "div")
         copy_buttons = [e for e in self.dom.by_tag("button") if "data-copy" in e["attrs"]]
         for button in copy_buttons:
             key = button["attrs"]["data-copy"]
@@ -384,7 +415,7 @@ class ScenarioPageStructureTest(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(self.dom.by_id("copy-" + key)["tag"], "pre")
                 expand = [e for e in self.dom.by_tag("button") if e["attrs"].get("data-expand") == "copy-" + key]
-                self.assertEqual(len(expand), 1)
+                self.assertEqual(expand, [])
         self.assertEqual(
             {button["attrs"]["data-copy"] for button in copy_buttons},
             {"url", "curlModern", "curlLegacy", "token", "header", "configJson", "cliProbe", "cliRun",
@@ -459,9 +490,7 @@ if (paste) {
 setTimeout(() => {
   const el = (id) => document.getElementById(id);
   process.stdout.write(JSON.stringify({
-    advancedOpen: el("advancedBox").open,
     advancedCount: el("advancedCount").textContent,
-    errorOpen: el("errorBox").open,
     errorCount: el("errorCount").textContent,
     loadStatus: el("loadStatus").textContent,
     url: el("mcpUrl").value,
@@ -500,15 +529,17 @@ setTimeout(() => {
         paste: str = "",
     ) -> dict[str, Any]:
         """decode_body: what the stand-in server answers to decode and validate.
-        paste: text put into "설정 불러오기" and loaded once the page has started."""
+        paste: text put into "주소로 불러오기" and loaded once the page has started."""
         scripts = parse(page).scripts
         (self.root / "scripts.json").write_text(json.dumps(scripts), encoding="utf-8")
         args = [NODE, str(self.root / "stub.js"), str(self.root / "scripts.json"), url_hash]
         if decode_body is not None:
             (self.root / "decode.json").write_text(json.dumps(decode_body), encoding="utf-8")
             args.append(str(self.root / "decode.json"))
-            if paste:
-                args.append(paste)
+        elif paste:
+            args.append("")
+        if paste:
+            args.append(paste)
         done = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
         return json.loads(done.stdout)
@@ -541,37 +572,54 @@ setTimeout(() => {
         self.assertEqual(result["hash"], "")
         # Nothing is sent on load: no preview request, no validation, no global change.
         self.assertEqual(result["requests"], [])
-        # Only the basic settings are in view: both folds are closed and say 0.
-        self.assertEqual((result["advancedOpen"], result["advancedCount"]), (False, "기본값과 다른 설정 0개"))
-        self.assertEqual((result["errorOpen"], result["errorCount"]), (False, "켜진 것 0개"))
+        self.assertEqual((result["advancedCount"], result["errorCount"]), ("기본값과 다른 설정 0개", "켜진 것 0개"))
+        self.assertEqual((result["loadStatus"], result["loadError"]), ("", ""))
 
     def start_from(self, patch: dict[str, Any]) -> dict[str, Any]:
         config = normalize_config(patch)
         token = encode_config_token(config)
         return self.start(render_scenario_page(), f"#cfg={token}", {"ok": True, "config": config, "token": token})
 
-    def test_a_cfg_address_opens_the_fold_that_holds_its_settings(self) -> None:
+    def test_a_cfg_address_shows_how_many_settings_each_part_holds(self) -> None:
         advanced = self.start_from({"strict2026": False, "allowedOrigins": ["https://app.example.com"]})
-        self.assertEqual((advanced["advancedOpen"], advanced["advancedCount"]), (True, "기본값과 다른 설정 2개"))
-        self.assertEqual((advanced["errorOpen"], advanced["errorCount"]), (False, "켜진 것 0개"))
+        self.assertEqual((advanced["advancedCount"], advanced["errorCount"]), ("기본값과 다른 설정 2개", "켜진 것 0개"))
 
         error = self.start_from({"toolCall": {"mode": "is-error", "delaySeconds": 1}, "toolsList": {"mode": "empty"}})
-        self.assertEqual((error["advancedOpen"], error["advancedCount"]), (False, "기본값과 다른 설정 0개"))
-        self.assertEqual((error["errorOpen"], error["errorCount"]), (True, "켜진 것 3개"))
+        self.assertEqual((error["advancedCount"], error["errorCount"]), ("기본값과 다른 설정 0개", "켜진 것 3개"))
 
         both = self.start_from({"session": {"validate": True}, "server": {"delayEnabled": True}})
-        self.assertEqual((both["advancedOpen"], both["advancedCount"]), (True, "기본값과 다른 설정 1개"))
-        self.assertEqual((both["errorOpen"], both["errorCount"]), (True, "켜진 것 1개"))
+        self.assertEqual((both["advancedCount"], both["errorCount"]), ("기본값과 다른 설정 1개", "켜진 것 1개"))
 
-    def test_a_change_of_the_basic_settings_opens_nothing(self) -> None:
+    def test_a_change_of_the_basic_settings_counts_in_neither_part(self) -> None:
         result = self.start_from(
             {"serverEra": "modern", "auth": {"mode": "oauth"}, "mcp": {"identifier": "my-server", "serviceName": "내 서비스"}}
         )
         self.assertTrue(result["chipsEmptyHidden"])
-        self.assertEqual((result["advancedOpen"], result["advancedCount"]), (False, "기본값과 다른 설정 0개"))
-        self.assertEqual((result["errorOpen"], result["errorCount"]), (False, "켜진 것 0개"))
+        self.assertEqual((result["advancedCount"], result["errorCount"]), ("기본값과 다른 설정 0개", "켜진 것 0개"))
+        # Entering by a #cfg address fills the form without the notice of a load.
+        self.assertEqual(result["loadStatus"], "")
 
-    def test_a_pasted_config_json_opens_the_folds_too(self) -> None:
+    def test_an_address_put_in_fills_the_settings_and_says_which(self) -> None:
+        patch = {"serverEra": "legacy", "allowedOrigins": ["https://app.example.com"], "toolCall": {"mode": "sse"}}
+        config = normalize_config(patch)
+        token = encode_config_token(config)
+        result = self.start(
+            render_scenario_page(),
+            decode_body={"ok": True, "config": config, "token": token},
+            paste=f"https://mcp.example.com/mcp?cfg={token}",
+        )
+        self.assertEqual(
+            result["loadStatus"],
+            "설정 3개를 채웠습니다: 지원 스펙, 허용할 Origin, tools/call 응답. 채운 항목은 아래에 '바꿈'으로 표시됩니다.",
+        )
+        self.assertEqual(result["loadError"], "")
+        self.assertEqual(result["requests"], [{"url": "/scenario", "action": "decode"}])
+        # The address the page makes now carries the same config, on this server.
+        self.assertEqual(result["url"], f"http://localhost:8000/mcp?cfg={token}")
+        self.assertTrue(result["chipsEmptyHidden"])
+        self.assertEqual((result["advancedCount"], result["errorCount"]), ("기본값과 다른 설정 1개", "켜진 것 1개"))
+
+    def test_a_pasted_config_json_fills_the_settings_too(self) -> None:
         patch = {"toolsList": {"pageSize": 2}, "toolCall": {"mode": "sse"}}
         config = normalize_config(patch)
         result = self.start(
@@ -579,10 +627,47 @@ setTimeout(() => {
             decode_body={"ok": True, "config": config, "token": encode_config_token(config)},
             paste=json.dumps(patch),
         )
-        self.assertEqual(result["loadStatus"], "설정을 불러왔습니다.")
+        self.assertEqual(
+            result["loadStatus"],
+            "설정 2개를 채웠습니다: 한 페이지의 툴 수, tools/call 응답. 채운 항목은 아래에 '바꿈'으로 표시됩니다.",
+        )
         self.assertEqual(result["requests"], [{"url": "/scenario", "action": "validate"}])
-        self.assertEqual((result["advancedOpen"], result["advancedCount"]), (True, "기본값과 다른 설정 1개"))
-        self.assertEqual((result["errorOpen"], result["errorCount"]), (True, "켜진 것 1개"))
+        self.assertEqual((result["advancedCount"], result["errorCount"]), ("기본값과 다른 설정 1개", "켜진 것 1개"))
+
+    def test_an_address_without_a_config_is_the_default_server(self) -> None:
+        for address in ("https://mcp.example.com/mcp", "http://localhost:8000/mcp/", "/mcp", "https://h.example/a/mcp?x=1"):
+            with self.subTest(address=address):
+                result = self.start(render_scenario_page(), paste=address)
+                self.assertEqual(
+                    result["loadStatus"], "기본 설정 그대로인 주소입니다. 아래 항목은 모두 기본값입니다."
+                )
+                self.assertEqual(result["loadError"], "")
+                # Nothing to ask the server: there is no config to read.
+                self.assertEqual(result["requests"], [])
+                self.assertEqual(result["url"], "http://localhost:8000/mcp")
+                self.assertFalse(result["chipsEmptyHidden"])
+
+    def test_what_cannot_be_read_is_said_in_plain_words(self) -> None:
+        cases = (
+            ("https://www.example.com/docs", {"ok": False, "error": "no cfg parameter in the URL"},
+             "MCP 주소가 아닙니다. /mcp로 끝나는 주소나 설정(cfg=…)이 든 주소를 넣으세요. (no cfg parameter in the URL)"),
+            ("https://mcp.example.com/mcp?cfg=broken", {"ok": False, "error": "invalid config token"},
+             "주소나 설정 코드를 읽지 못했습니다. 이 서버에서 만든 주소가 아니거나 중간이 잘렸을 수 있습니다. "
+             "(invalid config token)"),
+            ('{"toolCall": ', None, None),
+            ('{"noSuchSetting": 1}', None, "모르는 설정: noSuchSetting"),
+        )
+        for text, answer, expected in cases:
+            with self.subTest(text=text):
+                result = self.start(render_scenario_page(), decode_body=answer, paste=text)
+                self.assertEqual(result["loadStatus"], "")
+                if expected is None:
+                    self.assertTrue(result["loadError"].startswith("JSON"), result["loadError"])
+                else:
+                    self.assertEqual(result["loadError"], expected)
+                # The form stays as it was.
+                self.assertEqual(result["url"], "http://localhost:8000/mcp")
+                self.assertFalse(result["chipsEmptyHidden"])
 
     def test_start_from_a_hash_token(self) -> None:
         config = normalize_config({"serverEra": "legacy", "mcp": {"serviceName": "한글 서비스"}})
@@ -605,7 +690,9 @@ setTimeout(() => {
             render_scenario_page(), "#cfg=%%%", {"ok": False, "error": "invalid config token"}
         )
         self.assertEqual(
-            result["loadError"], "주소나 설정 코드를 읽지 못했습니다. 잘린 곳이 없는지 확인하세요. (invalid config token)"
+            result["loadError"],
+            "주소나 설정 코드를 읽지 못했습니다. 이 서버에서 만든 주소가 아니거나 중간이 잘렸을 수 있습니다. "
+            "(invalid config token)",
         )
         self.assertEqual(result["url"], "http://localhost:8000/mcp")
         self.assertEqual(result["hash"], "")

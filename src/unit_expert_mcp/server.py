@@ -1294,9 +1294,9 @@ def modern_test_tools(service_name: str = SERVICE_NAME) -> list[dict[str, Any]]:
         {
             "name": INTERACTIVE_TOOL,
             "description": (
-                f"{service_name} interactive unit conversion over the input_required flow. "
-                "Call 1 asks for the target unit, call 2 asks for the number of decimals, "
-                "call 3 returns the converted value."
+                f"{service_name} converts a value when the user has not said which unit to convert to. "
+                "Use this instead of asking the user yourself: the tool asks the user for the target unit, "
+                "then for the number of decimal places, and then returns the converted value."
             ),
             "inputSchema": {
                 "type": "object",
@@ -6822,7 +6822,7 @@ var UnitExpertUI = (function () {
   }
 
   /* Every word of query appears in the option's label, key, description,
-     "자세히" lines or choices. */
+     help lines or choices. */
   function matchOptionSearch(option, query) {
     var words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) return true;
@@ -7033,6 +7033,16 @@ var UnitExpertUI = (function () {
     }
     if (/^cfg:/i.test(value)) return value.slice(4).trim();
     return /[?&=\/\s]/.test(value.replace(/=+$/, "")) ? "" : value;
+  }
+
+  /* An MCP address (URL or path ending in /mcp) that carries no config: the
+     server with its default settings. */
+  function isPlainMcpAddress(text) {
+    var value = String(text === undefined || text === null ? "" : text).trim();
+    if (!/^(https?:\/\/[^\s\/?#]+)?\/\S*$/i.test(value)) return false;
+    if (/(?:^|[?&#])cfg=/.test(value)) return false;
+    var path = value.replace(/^https?:\/\/[^\/?#]+/i, "").split(/[?#]/)[0];
+    return /\/mcp\/?$/.test(path);
   }
 
   var FILTER_KINDS = ["ok", "injected", "rejected", "raw", "closed"];
@@ -7789,7 +7799,7 @@ var UnitExpertUI = (function () {
     return unknown;
   }
 
-  /* What a text pasted into "설정 불러오기" is: {ok, kind, patch, text, error}.
+  /* What a text pasted into "주소로 불러오기" is: {ok, kind, patch, text, error}.
      kind "json": a config JSON (the part that differs from the defaults; a
      {"config": {...}} wrapper is taken off). kind "token": anything else, to
      be read as an address or a config code. */
@@ -7820,7 +7830,7 @@ var UnitExpertUI = (function () {
      [{id, label}] in display order. */
   function configFormatText(schema, sections, origin) {
     var lines = [
-      "MCP 테스트 서버 설정 JSON 형식 (MCP 서버 만들기 화면의 '설정 불러오기'에 붙여 넣습니다)",
+      "MCP 테스트 서버 설정 JSON 형식 (MCP 서버 만들기 화면의 '주소로 불러오기'에 붙여 넣습니다)",
       "",
       "기본값과 다르게 바꿀 항목만 담은 JSON 객체입니다. {}는 기본 설정입니다.",
       '경로의 점(.)마다 한 단계 중첩합니다. 예) toolCall.mode → {"toolCall": {"mode": "is-error"}}',
@@ -7941,6 +7951,7 @@ var UnitExpertUI = (function () {
     toolName: toolName,
     tokenSummary: tokenSummary,
     tokenFromText: tokenFromText,
+    isPlainMcpAddress: isPlainMcpAddress,
     defaultFilters: defaultFilters,
     filtersFromQuery: filtersFromQuery,
     filtersToQuery: filtersToQuery,
@@ -8149,8 +8160,18 @@ def render_nav(current: str) -> str:
   <script>document.getElementById("ueHost").textContent = location.host;</script>"""
 
 
-def render_copy_item(key: str, label: str, copy_label: str | None = None) -> str:
-    """One thing a page copies: its name, a copy button and the exact text."""
+def render_copy_item(key: str, label: str, copy_label: str | None = None, expand: bool = True) -> str:
+    """One thing a page copies: its name, a copy button and the exact text.
+
+    ``expand``: the text shows two lines until "전체 보기" opens it. Without
+    it the page shows the whole text (scrolling inside when it is long).
+    """
+    expand_button = (
+        f'<button type="button" class="link-button copy-expand" data-expand="copy-{key}" '
+        'aria-expanded="false" hidden>전체 보기</button>'
+        if expand
+        else ""
+    )
     return f"""
             <div class="copy-item" data-item="{key}">
               <div class="copy-head">
@@ -8158,7 +8179,7 @@ def render_copy_item(key: str, label: str, copy_label: str | None = None) -> str
                 <button type="button" class="secondary small" data-copy="{key}" data-copy-label="{escape(copy_label or label)}">복사</button>
               </div>
               <pre class="copy-text" id="copy-{key}" tabindex="0"></pre>
-              <button type="button" class="link-button copy-expand" data-expand="copy-{key}" aria-expanded="false" hidden>전체 보기</button>
+              {expand_button}
             </div>"""
 
 
@@ -8217,12 +8238,12 @@ def _option_text(choice: dict[str, Any]) -> str:
 
 
 def _help_box(option: dict[str, Any]) -> str:
-    """The lines of ``help`` under "자세히", folded. Empty when the option has none."""
+    """The lines of ``help`` as a list under the control, always in view. Empty when the option has none."""
     lines = option.get("help") or []
     if not lines:
         return ""
     items = "".join(f"<li>{escape(line)}</li>" for line in lines)
-    return f'<details class="opt-help"><summary>자세히</summary><ul>{items}</ul></details>'
+    return f'<ul class="opt-help">{items}</ul>'
 
 
 def render_option(option: dict[str, Any]) -> str:
@@ -8320,7 +8341,7 @@ def render_option(option: dict[str, Any]) -> str:
         )
 
     description = _sentence(option["description"])
-    # A long "자세히" list reads badly in half a row.
+    # A long help list reads badly in half a row.
     wide = wide or len(option.get("help") or []) > 3
     badge = APPLIES_TO_BADGES.get(option["appliesTo"])
     badge_html = f'<span class="era-badge">{escape(badge)}</span>' if badge else ""
@@ -8342,12 +8363,11 @@ def render_option(option: dict[str, Any]) -> str:
 
 
 def render_option_groups(meta: dict[str, Any]) -> tuple[str, str, str]:
-    """(basic rows, advanced cards, error groups) in the order of the meta.
+    """(basic rows, advanced cards, error cards) in the order of the meta.
 
-    Basic: the options marked ``basic``, always in view at the top. Advanced:
-    the other build options, one card per group (a group left without options
-    has no card). Error: one folding group each; the ones marked ``open``
-    start expanded once "에러 넣기" itself is opened.
+    Basic: the options marked ``basic``, at the top. Advanced: the other build
+    options, one card per group (a group left without options has no card).
+    Error: one card per group. Nothing folds: every option is in view.
     """
     basic = "".join(render_option(option) for option in meta["options"] if option.get("basic"))
     advanced: list[str] = []
@@ -8361,9 +8381,7 @@ def render_option_groups(meta: dict[str, Any]) -> tuple[str, str, str]:
         )
         if not rows:
             continue
-        if group["section"] == "build":
-            advanced.append(
-                f"""
+        card = f"""
         <section class="group-card" data-group="{group_id}" aria-labelledby="g-{group_id}">
           <div class="group-head">
             <h3 id="g-{group_id}" class="group-title">{escape(group["label"])}</h3>
@@ -8373,21 +8391,7 @@ def render_option_groups(meta: dict[str, Any]) -> tuple[str, str, str]:
           <div class="group-body">{rows}
           </div>
         </section>"""
-            )
-            continue
-        open_attr = ' open data-default-open="1"' if group.get("open") else ""
-        error.append(
-            f"""
-        <details class="group" data-group="{group_id}"{open_attr}>
-          <summary>
-            <span class="group-title">{escape(group["label"])}</span>
-            <span class="group-badge" hidden></span>
-            <span class="group-desc">{escape(group["description"])}</span>
-          </summary>
-          <div class="group-body">{rows}
-          </div>
-        </details>"""
-        )
+        (advanced if group["section"] == "build" else error).append(card)
     return basic, "".join(advanced), "".join(error)
 
 
@@ -8441,7 +8445,7 @@ def render_presets(meta: dict[str, Any]) -> tuple[str, str]:
           </table>
           <div id="matrixDetail" class="matrix-detail" hidden>
             <p><strong>기대 결과</strong> <span id="matrixExpect"></span></p>
-            {render_copy_item("matrixCli", "이 조합을 검사하는 명령", "검사 명령")}
+            {render_copy_item("matrixCli", "이 조합을 검사하는 명령", "검사 명령", expand=False)}
           </div>"""
     injection_html = f"""
           <div class="preset-buttons" role="group" aria-labelledby="injectionTitle">{injections}</div>
@@ -8468,7 +8472,7 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
         "cliPrefix": CLIENT_COMMAND_PREFIX,
     }
     copy_items = "".join(
-        render_copy_item(key, label, copy_label)
+        render_copy_item(key, label, copy_label, expand=False)
         for key, label, copy_label in (
             ("configJson", "설정 JSON (기본값과 다른 부분)", "설정 JSON"),
             ("token", "설정 코드 (주소의 cfg= 뒤에 붙는 값)", "설정 코드"),
@@ -8493,7 +8497,9 @@ def render_scenario_page(message: str | None = None, error: str | None = None) -
             "ADVANCED_GROUPS": advanced_groups,
             "ERROR_GROUPS": error_groups,
             "COPY_ITEMS": copy_items,
-            "FORMAT_ITEM": render_copy_item("configFormat", "설정 JSON 형식 (AI에게 주고 설정을 만들게 할 때)", "설정 JSON 형식"),
+            "FORMAT_ITEM": render_copy_item(
+                "configFormat", "설정 JSON 형식 (AI에게 주고 설정을 만들게 할 때)", "설정 JSON 형식", expand=False
+            ),
             "UI_CORE_JS": UI_CORE_JS,
             "PAGE_JS": _fill_template(
                 _SCENARIO_PAGE_JS,
@@ -8547,24 +8553,32 @@ _SCENARIO_PAGE = """<!doctype html>
     .basic-card[hidden] { display: none; }
     .basic-card h2 { margin: 0; font-size: 19px; }
     .basic-card > .group-body > .opt { border-top: 0; padding-top: 10px; padding-bottom: 8px; }
-    /* The two folded parts: everything past the four basic settings. */
-    .fold { border: 1px solid var(--line); border-radius: 10px; background: #f6f7fa; min-width: 0; }
-    .fold[hidden] { display: none; }
-    .fold > summary {
-      padding: 14px 16px; cursor: pointer; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
-      border-radius: 10px;
+    .part[hidden] { display: none; }
+    .part { scroll-margin-top: 52px; }
+    .part-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 6px 2px 0; }
+    .part-head h2 { margin: 0; font-size: 19px; }
+    .part.error-part .part-head h2 { color: var(--danger); }
+    .group > summary::before { content: "▸"; color: var(--muted); width: 12px; flex: none; }
+    .group[open] > summary::before { content: "▾"; }
+    /* "주소로 불러오기": the first thing on the page. */
+    .load-card { margin-top: 14px; }
+    .load-card h2 { margin: 0 0 2px; }
+    .load-card .status-line:empty, .load-card .error-text:empty { display: none; }
+    .load-card .status-line { margin-top: 8px; font-weight: 600; color: var(--success); }
+    .load-card .error-text { margin-top: 8px; }
+    /* Jumps to the parts of a page that is long on purpose. */
+    .toc {
+      position: sticky; top: 0; z-index: 4; background: var(--bg); padding: 8px 2px;
+      display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap; font-size: 13px;
+      border-bottom: 1px solid var(--line);
     }
-    .fold-title { display: inline; margin: 0; font-size: 17px; }
-    /* A flex summary has no marker of its own. */
-    .fold > summary::before, .group > summary::before { content: "▸"; color: var(--muted); width: 12px; flex: none; }
-    .fold[open] > summary::before, .group[open] > summary::before { content: "▾"; }
-    .fold.error-fold .fold-title { color: var(--danger); }
+    .toc-label { color: var(--muted); }
+    .copy-text { max-height: 240px; overflow: auto; }
     .fold-count {
       font-size: 12px; font-weight: 600; color: var(--muted); background: var(--surface);
       border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; white-space: nowrap;
     }
     .fold-count.is-on { color: var(--changed); background: var(--changed-soft); border-color: var(--changed-line); }
-    .fold-body { display: grid; gap: 10px; padding: 0 12px 12px; min-width: 0; }
     .result-col {
       display: grid; gap: 10px; min-width: 0;
       position: sticky;
@@ -8578,12 +8592,7 @@ _SCENARIO_PAGE = """<!doctype html>
     .summary-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0; }
     .summary-head h3 { margin: 0; }
     .result-actions { display: grid; gap: 8px; margin-top: 14px; }
-    .more > summary { cursor: pointer; font-weight: 700; font-size: 14px; }
-    .more > summary .hint { font-weight: 400; margin-left: 6px; }
-    .more-body { display: grid; gap: 14px; margin-top: 12px; }
-    .load-row { display: grid; gap: 6px; }
-    .load-box .group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding-bottom: 14px; }
-    .load-row button { justify-self: start; }
+    .more-body { display: grid; gap: 14px; }
 
     .matrix { border-collapse: collapse; width: 100%; margin-top: 8px; table-layout: fixed; }
     .matrix th { font-size: 12px; color: var(--muted); font-weight: 600; padding: 4px 6px; text-align: left; }
@@ -8632,8 +8641,8 @@ _SCENARIO_PAGE = """<!doctype html>
     .group.danger-zone { border-color: #f0b4ad; }
     .group.danger-zone .group-title { color: var(--danger); }
     .danger-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
-    .danger-zone .group-body, .compat .group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding-bottom: 14px; }
-    .aux { display: grid; gap: 10px; }
+    .danger-zone .group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding-bottom: 14px; }
+    .danger-zone { scroll-margin-top: 52px; }
 
     .opt { padding: 12px 0 12px 10px; border-top: 1px solid var(--line); border-left: 3px solid transparent; margin-left: -13px; display: grid; gap: 5px; align-content: start; min-width: 0; }
     .opt[hidden] { display: none; }
@@ -8645,8 +8654,7 @@ _SCENARIO_PAGE = """<!doctype html>
     .opt-desc { color: var(--muted); font-size: 13px; }
     .opt-meta { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
     .opt-default { color: #7a8494; font-size: 12px; overflow-wrap: anywhere; }
-    .opt-help > summary { cursor: pointer; width: fit-content; font-size: 12px; font-weight: 600; color: var(--accent-strong); }
-    .opt-help ul { margin: 6px 0 2px; padding-left: 18px; display: grid; gap: 5px; font-size: 13px; color: var(--muted); }
+    .opt-help { margin: 2px 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
     .opt-key { color: #8a93a1; font-size: 11px; background: none; border: 0; padding: 0; }
     .opt-range, .choice-desc { color: var(--muted); font-size: 12px; }
     .choice-desc:empty { display: none; }
@@ -8683,8 +8691,9 @@ _SCENARIO_PAGE = """<!doctype html>
     .chip-remove:hover { background: var(--changed-line); color: var(--text); }
     @media (max-width: 980px) {
       /* One column. The address card (address, copy, changed settings) stays
-         at the top of the window while the options scroll under it; the other
-         copy forms follow the options. */
+         at the top of the window while the options scroll under it. */
+      .toc { position: static; }
+      .part, .danger-zone { scroll-margin-top: 250px; }
       .layout { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
       .result-col { display: contents; }
       .result-col .card { order: 2; }
@@ -8723,8 +8732,28 @@ _SCENARIO_PAGE = """<!doctype html>
       <button type="button" class="danger" id="globalBannerReset">서버 기본값 되돌리기</button>
     </div>
     __NOTICE__
+    <section class="card load-card" id="loadCard" aria-labelledby="loadTitle">
+      <h2 id="loadTitle"><label for="loadToken">주소로 불러오기</label></h2>
+      <p class="card-desc">가지고 있는 MCP 주소를 넣으면 그 주소의 설정이 아래에 채워집니다. 설정 코드나 설정 JSON을 넣어도 됩니다.</p>
+      <div class="url-row">
+        <input type="text" id="loadToken" autocomplete="off" spellcheck="false" placeholder="MCP 주소를 붙여 넣으세요 (예: https://…/mcp?cfg=…)">
+        <button type="button" class="secondary" id="loadTokenButton">불러오기</button>
+      </div>
+      <p id="loadError" class="error-text" role="alert"></p>
+      <p id="loadStatus" class="status-line" aria-live="polite"></p>
+    </section>
     <div class="layout">
       <div class="options-col" id="optionsCol">
+        <nav class="toc" id="toc" aria-label="구역으로 이동">
+          <span class="toc-label">바로 가기</span>
+          <button type="button" class="link-button" data-jump="basicPart">기본 설정</button>
+          <button type="button" class="link-button" data-jump="advancedPart">자세한 설정</button>
+          <button type="button" class="link-button" data-jump="errorPart">에러 넣기</button>
+          <button type="button" class="link-button" data-jump="copyPart">다른 형태로 복사</button>
+          <button type="button" class="link-button" data-jump="compatPart">호환 테스트</button>
+          <button type="button" class="link-button" data-jump="dangerZone">서버 기본값 바꾸기</button>
+        </nav>
+
         <section class="part" id="basicPart" aria-labelledby="basicTitle">
           <div class="card basic-card" id="basicCard">
             <div class="group-head">
@@ -8734,81 +8763,74 @@ _SCENARIO_PAGE = """<!doctype html>
             <div class="group-body">__BASIC_ROWS__
             </div>
           </div>
-          <details class="group load-box" id="loadBox">
-            <summary>
-              <span class="group-title">설정 불러오기</span>
-              <span class="group-desc">가지고 있는 MCP 주소, 설정 코드, 설정 JSON을 붙여 넣으면 이 화면의 항목이 채워집니다</span>
-            </summary>
-            <div class="group-body">
-              <div class="load-row">
-                <label for="loadToken" class="hint">붙여 넣으면 바로 읽습니다. 직접 적었다면 "불러오기"를 누르세요.</label>
-                <textarea id="loadToken" rows="3" autocomplete="off" spellcheck="false" placeholder="MCP 주소, 설정 코드, 또는 설정 JSON을 붙여 넣으세요"></textarea>
-                <button type="button" class="secondary" id="loadTokenButton">불러오기</button>
-                <p id="loadError" class="error-text" role="alert"></p>
-                <p id="loadStatus" class="status-line" aria-live="polite"></p>
-              </div>
-              __FORMAT_ITEM__
-            </div>
-          </details>
         </section>
 
-        <details class="fold" id="advancedBox">
-          <summary>
-            <h2 class="fold-title" id="advancedTitle">자세한 설정</h2>
+        <section class="part" id="advancedPart" aria-labelledby="advancedTitle">
+          <div class="part-head">
+            <h2 id="advancedTitle">자세한 설정</h2>
             <span class="fold-count" id="advancedCount">기본값과 다른 설정 0개</span>
             <span class="group-desc">요청 검증, 인증 범위, 툴 목록, 세션처럼 필요할 때만 바꾸는 설정입니다</span>
-          </summary>
-          <div class="fold-body">__ADVANCED_GROUPS__
-          </div>
-        </details>
+          </div>__ADVANCED_GROUPS__
+        </section>
 
-        <details class="fold error-fold" id="errorBox">
-          <summary>
-            <h2 class="fold-title" id="errorTitle">에러 넣기</h2>
+        <section class="part error-part" id="errorPart" aria-labelledby="errorTitle">
+          <div class="part-head">
+            <h2 id="errorTitle">에러 넣기</h2>
             <span class="fold-count" id="errorCount">켜진 것 0개</span>
             <span class="group-desc">__ERROR_DESC__</span>
+          </div>
+          <section class="card" id="injectionCard" aria-labelledby="injectionTitle">
+            <h3 id="injectionTitle">자주 쓰는 에러</h3>
+            __INJECTIONS__
+          </section>__ERROR_GROUPS__
+        </section>
+
+        <section class="part" id="copyPart" aria-labelledby="copyTitle">
+          <div class="part-head">
+            <h2 id="copyTitle">다른 형태로 복사</h2>
+            <span class="group-desc">주소 말고 다른 형태가 필요할 때 씁니다. 지금 설정이 그대로 담깁니다</span>
+          </div>
+          <div class="card more" id="copyBox">
+            <div class="more-body">
+              <p id="moreNote" class="hint" hidden></p>
+              __COPY_ITEMS__
+              <p class="hint">테스트 명령은 이 저장소의 루트에서 실행합니다.</p>
+              __FORMAT_ITEM__
+            </div>
+          </div>
+        </section>
+
+        <section class="part" id="compatPart" aria-labelledby="compatTitle">
+          <div class="part-head">
+            <h2 id="compatTitle">2026-07-28 호환 테스트</h2>
+            <span class="group-desc">요청 방식과 서버의 조합을 골라 검사 명령을 받습니다. 칸을 누르면 지원 스펙이 바뀝니다</span>
+          </div>
+          <div class="card compat" id="compatBox">
+            __MATRIX__
+          </div>
+        </section>
+
+        <details class="group danger-zone" id="dangerZone">
+          <summary>
+            <span class="group-title">서버 기본값 바꾸기</span>
+            <span class="group-desc">모든 사용자에게 적용됩니다</span>
           </summary>
-          <div class="fold-body">
-            <section class="card" id="injectionCard" aria-labelledby="injectionTitle">
-              <h3 id="injectionTitle">자주 쓰는 에러</h3>
-              __INJECTIONS__
-            </section>
-            __ERROR_GROUPS__
+          <div class="group-body">
+            <p>주소에 설정이 없는 모든 요청의 동작을 바꿉니다. 서버를 다시 시작하면 처음으로 돌아갑니다.</p>
+            <p id="globalState" class="hint"></p>
+            <div class="danger-actions">
+              <button type="button" class="danger" id="applyGlobal">지금 설정을 서버 기본값으로</button>
+              <button type="button" class="danger" id="resetGlobal">서버 기본값 되돌리기</button>
+              <button type="button" class="danger" id="expireSessions">세션 모두 끊기</button>
+            </div>
+            <p id="dangerStatus" class="status-line" aria-live="polite"></p>
           </div>
         </details>
-
-        <div class="aux">
-          <details class="group compat" id="compatBox">
-            <summary>
-              <span class="group-title">2026-07-28 호환 테스트</span>
-              <span class="group-desc">요청 방식과 서버의 조합을 골라 검사 명령을 받습니다</span>
-            </summary>
-            <div class="group-body">
-              __MATRIX__
-            </div>
-          </details>
-          <details class="group danger-zone" id="dangerZone">
-            <summary>
-              <span class="group-title">서버 기본값 바꾸기</span>
-              <span class="group-desc">모든 사용자에게 적용됩니다</span>
-            </summary>
-            <div class="group-body">
-              <p>주소에 설정이 없는 모든 요청의 동작을 바꿉니다. 서버를 다시 시작하면 처음으로 돌아갑니다.</p>
-              <p id="globalState" class="hint"></p>
-              <div class="danger-actions">
-                <button type="button" class="danger" id="applyGlobal">지금 설정을 서버 기본값으로</button>
-                <button type="button" class="danger" id="resetGlobal">서버 기본값 되돌리기</button>
-                <button type="button" class="danger" id="expireSessions">세션 모두 끊기</button>
-              </div>
-              <p id="dangerStatus" class="status-line" aria-live="polite"></p>
-            </div>
-          </details>
-        </div>
       </div>
 
-      <aside class="result-col" aria-label="내 MCP 서버 주소">
+      <aside class="result-col" aria-label="만들어진 주소">
         <section class="card primary" id="resultCard" aria-labelledby="urlTitle">
-          <h2 id="urlTitle"><label for="mcpUrl">내 MCP 서버 주소</label></h2>
+          <h2 id="urlTitle"><label for="mcpUrl">만들어진 주소</label></h2>
           <p class="card-desc">이 주소를 MCP 클라이언트에 넣으면 지금 설정대로 동작합니다.</p>
           <div class="url-row">
             <input type="text" id="mcpUrl" readonly spellcheck="false" placeholder="오류를 고치면 주소가 만들어집니다">
@@ -8828,15 +8850,6 @@ _SCENARIO_PAGE = """<!doctype html>
             <a class="button secondary" id="inspectLink" href="/inspect">이 주소의 호출 기록 보기</a>
           </div>
         </section>
-
-        <details class="card more" id="moreBox">
-          <summary>다른 형태로 복사<span class="hint">설정 JSON · 설정 코드 · 요청 헤더 · curl · 테스트 명령</span></summary>
-          <div class="more-body">
-            <p id="moreNote" class="hint" hidden></p>
-            __COPY_ITEMS__
-            <p class="hint">테스트 명령은 이 저장소의 루트에서 실행합니다.</p>
-          </div>
-        </details>
       </aside>
     </div>
   </main>
@@ -8861,11 +8874,11 @@ _SCENARIO_PAGE_JS = r"""(function () {
   SCHEMA.forEach((option) => { OPTIONS[option.path] = option; });
   const PRESETS = {};
   META.presets.forEach((preset) => { PRESETS[preset.id] = preset; });
-  // The two folded parts of the page. Each shows how many of its options
-  // differ from the defaults and opens when that number becomes 1 or more.
-  const FOLDS = [
-    { tier: "advanced", box: "advancedBox", count: "advancedCount", text: (n) => "기본값과 다른 설정 " + n + "개" },
-    { tier: "error", box: "errorBox", count: "errorCount", text: (n) => "켜진 것 " + n + "개" }
+  // Next to the title of these two parts: how many of their options differ
+  // from the defaults.
+  const COUNTS = [
+    { tier: "advanced", part: "advancedPart", count: "advancedCount", text: (n) => "기본값과 다른 설정 " + n + "개" },
+    { tier: "error", part: "errorPart", count: "errorCount", text: (n) => "켜진 것 " + n + "개" }
   ];
   const CONFIG_FORMAT = UI.configFormatText(SCHEMA, META.sections, location.origin);
   const GATEWAY_URL_SLOT = "<게이트웨이 MCP 주소>";
@@ -8893,9 +8906,6 @@ _SCENARIO_PAGE_JS = r"""(function () {
     restoring: false,
     validateSeq: 0,
     validateTimer: null,
-    groupChanged: {},
-    // Whether each fold was open before a search started (null: no search).
-    foldsBeforeSearch: null,
     copyValues: {},
     errorPath: ""
   };
@@ -9036,20 +9046,6 @@ _SCENARIO_PAGE_JS = r"""(function () {
     if (node.textContent !== text) node.textContent = text;
   }
 
-  // Shows the "전체 보기" button of every copy text that does not fit in its
-  // two lines. A text inside a closed <details> has no height yet, so this
-  // also runs when one opens.
-  function syncExpandButtons() {
-    document.querySelectorAll("[data-expand]").forEach((button) => {
-      const text = byId(button.dataset.expand);
-      const open = text.classList.contains("is-open");
-      button.hidden = !open && !(text.scrollHeight > text.clientHeight + 1);
-      button.setAttribute("aria-expanded", open ? "true" : "false");
-      const label = open ? "접기" : "전체 보기";
-      if (button.textContent !== label) button.textContent = label;
-    });
-  }
-
   // A copy item always shows the exact text its button copies. With nothing
   // to copy it says why, and the button is off.
   function writeCopyText(key, value, why) {
@@ -9097,7 +9093,6 @@ _SCENARIO_PAGE_JS = r"""(function () {
       const key = button.dataset.copy;
       button.disabled = !values[key] || (pending && key !== "matrixCli" && key !== "configFormat");
     });
-    syncExpandButtons();
   }
 
   const chipNodes = {};
@@ -9156,19 +9151,13 @@ _SCENARIO_PAGE_JS = r"""(function () {
     badge.textContent = "바꿈 " + count;
   }
 
-  // "기본값과 다른 설정 N개" / "켜진 것 N개" on the two folds. A fold opens
-  // when its number first becomes 1 or more: a change made here, a preset, a
-  // pasted config or a #cfg address. The user may close it again.
-  function renderFolds(config) {
+  // "기본값과 다른 설정 N개" / "켜진 것 N개" next to the two part titles.
+  function renderCounts(config) {
     const counts = UI.changedCounts(config, SCHEMA);
-    FOLDS.forEach((fold) => {
-      const count = counts[fold.tier];
-      const label = byId(fold.count);
-      setText(fold.count, fold.text(count));
-      label.classList.toggle("is-on", count > 0);
-      const key = "fold:" + fold.tier;
-      if (count > 0 && !state.groupChanged[key]) byId(fold.box).open = true;
-      state.groupChanged[key] = count > 0;
+    COUNTS.forEach((item) => {
+      const count = counts[item.tier];
+      setText(item.count, item.text(count));
+      byId(item.count).classList.toggle("is-on", count > 0);
     });
   }
 
@@ -9198,9 +9187,6 @@ _SCENARIO_PAGE_JS = r"""(function () {
     document.querySelectorAll("[data-group]").forEach((group) => {
       const count = changedByGroup[group.dataset.group] || 0;
       setBadge(group.querySelector(".group-badge"), count);
-      // Open a group when it first gets a change. The user may close it again.
-      if (count > 0 && !state.groupChanged[group.dataset.group]) group.open = true;
-      state.groupChanged[group.dataset.group] = count > 0;
     });
   }
 
@@ -9216,7 +9202,6 @@ _SCENARIO_PAGE_JS = r"""(function () {
   function renderPresets(config) {
     const matrix = state.matrixPreset ? PRESETS[state.matrixPreset] : null;
     if (matrix && !patchApplies(config, matrix.patch)) state.matrixPreset = null;
-    if (state.matrixPreset) byId("compatBox").open = true;
     document.querySelectorAll("[data-preset]").forEach((button) => {
       button.setAttribute("aria-pressed", presetActive(PRESETS[button.dataset.preset], config) ? "true" : "false");
     });
@@ -9265,7 +9250,7 @@ _SCENARIO_PAGE_JS = r"""(function () {
     renderResult(config, token, blocked, pending);
     renderChips(config);
     renderOptions(config, list.map((entry) => entry.path));
-    renderFolds(config);
+    renderCounts(config);
     renderErrors(list);
     if (!blocked && !pending) updateHash(token);
   }
@@ -9360,13 +9345,9 @@ _SCENARIO_PAGE_JS = r"""(function () {
   function revealOption(path) {
     const control = controlOf(path);
     if (!control) return;
-    // Open everything the control sits in: its group, then the fold around it.
-    let box = control.closest("details");
-    while (box) {
-      box.hidden = false;
-      box.open = true;
-      box = box.parentElement ? box.parentElement.closest("details") : null;
-    }
+    // Show what a search may have hidden around the control.
+    const part = control.closest(".part");
+    if (part) part.hidden = false;
     const card = control.closest("[data-group]");
     if (card) card.hidden = false;
     const row = control.closest(".opt");
@@ -9457,15 +9438,29 @@ _SCENARIO_PAGE_JS = r"""(function () {
 
   // The server message (English, part of the API) follows a Korean explanation.
   const LOAD_ERRORS = {
-    "invalid config token": "주소나 설정 코드를 읽지 못했습니다. 잘린 곳이 없는지 확인하세요.",
+    "invalid config token":
+      "주소나 설정 코드를 읽지 못했습니다. 이 서버에서 만든 주소가 아니거나 중간이 잘렸을 수 있습니다.",
     "empty config token": "붙여 넣은 내용이 없습니다.",
     "token must be a non-empty string": "붙여 넣은 내용이 없습니다.",
-    "no cfg parameter in the URL": "붙여 넣은 주소에 설정(cfg=…)이 없습니다."
+    "no cfg parameter in the URL":
+      "MCP 주소가 아닙니다. /mcp로 끝나는 주소나 설정(cfg=…)이 든 주소를 넣으세요."
   };
 
   function loadErrorText(message) {
     if (!message) return "설정을 불러오지 못했습니다.";
     return (LOAD_ERRORS[message] || "설정을 불러오지 못했습니다.") + " (" + message + ")";
+  }
+
+  // What "주소로 불러오기" says after a load: how many settings it filled
+  // in and which, or that the address is the default server.
+  function loadedText(config, plainAddress) {
+    const chips = UI.diffSummary(config, DEFAULTS, SCHEMA);
+    if (!chips.length) {
+      return (plainAddress ? "기본 설정 그대로인 주소입니다." : "기본 설정 그대로입니다.") +
+        " 아래 항목은 모두 기본값입니다.";
+    }
+    return "설정 " + chips.length + "개를 채웠습니다: " + chips.map((chip) => chip.label).join(", ") +
+      ". 채운 항목은 아래에 '바꿈'으로 표시됩니다.";
   }
 
   // text: an MCP address, a config code, or a config JSON (the part that
@@ -9475,11 +9470,15 @@ _SCENARIO_PAGE_JS = r"""(function () {
     setText("loadStatus", "");
     const pasted = UI.parseConfigPaste(text, DEFAULTS);
     if (!pasted.ok) {
-      setText("loadError", pasted.error);
+      setText("loadError", pasted.error + (pasted.kind === "json" ? "" : "."));
       return false;
     }
+    const plainAddress = pasted.kind !== "json" && UI.isPlainMcpAddress(text);
     let body;
-    if (pasted.kind === "json") {
+    if (plainAddress) {
+      // An MCP address without a config is the server as it is by default.
+      body = { ok: true, config: UI.clone(DEFAULTS), token: "" };
+    } else if (pasted.kind === "json") {
       try {
         body = await postScenario({ action: "validate", config: pasted.patch });
       } catch (error) {
@@ -9506,7 +9505,7 @@ _SCENARIO_PAGE_JS = r"""(function () {
       }
     }
     loadConfig(body.config, body.token);
-    if (announce) setText("loadStatus", "설정을 불러왔습니다.");
+    if (announce) setText("loadStatus", loadedText(body.config, plainAddress));
     return true;
   }
 
@@ -9539,14 +9538,9 @@ _SCENARIO_PAGE_JS = r"""(function () {
   }
 
   // The search covers every option row and the error buttons. A group or
-  // fold with no match is hidden; one with a match is opened. Clearing the
-  // search puts the folds back the way they were.
+  // part with no match is hidden.
   function applySearch() {
     const query = byId("optionSearch").value.trim();
-    if (query && !state.foldsBeforeSearch) {
-      state.foldsBeforeSearch = {};
-      FOLDS.forEach((fold) => { state.foldsBeforeSearch[fold.tier] = Boolean(byId(fold.box).open); });
-    }
     let matches = 0;
     const tierMatches = { basic: 0, advanced: 0, error: 0 };
     document.querySelectorAll(".opt").forEach((row) => {
@@ -9560,11 +9554,6 @@ _SCENARIO_PAGE_JS = r"""(function () {
     document.querySelectorAll("[data-group]").forEach((group) => {
       const inside = Array.from(group.querySelectorAll(".opt")).filter((row) => !row.hidden).length;
       group.hidden = inside === 0;
-      if (group.tagName === "DETAILS") {
-        group.open = query
-          ? inside > 0
-          : Boolean(state.groupChanged[group.dataset.group]) || group.dataset.defaultOpen === "1";
-      }
     });
     let presetMatchCount = 0;
     document.querySelectorAll("#injectionCard [data-preset]").forEach((button) => {
@@ -9573,18 +9562,9 @@ _SCENARIO_PAGE_JS = r"""(function () {
       if (match) presetMatchCount += 1;
     });
     byId("injectionCard").hidden = presetMatchCount === 0;
-    byId("basicCard").hidden = tierMatches.basic === 0;
-    const inFold = { advanced: tierMatches.advanced, error: tierMatches.error + (query ? presetMatchCount : 0) };
-    FOLDS.forEach((fold) => {
-      const box = byId(fold.box);
-      box.hidden = Boolean(query) && inFold[fold.tier] === 0;
-      if (query) {
-        box.open = inFold[fold.tier] > 0;
-      } else if (state.foldsBeforeSearch) {
-        box.open = state.foldsBeforeSearch[fold.tier] || Boolean(state.groupChanged["fold:" + fold.tier]);
-      }
-    });
-    if (!query) state.foldsBeforeSearch = null;
+    byId("basicPart").hidden = tierMatches.basic === 0;
+    byId("advancedPart").hidden = tierMatches.advanced === 0;
+    byId("errorPart").hidden = tierMatches.error === 0 && presetMatchCount === 0;
     setText("searchCount", query ? "설정 " + matches + "개, 에러 버튼 " + presetMatchCount + "개" : "");
   }
 
@@ -9657,9 +9637,9 @@ _SCENARIO_PAGE_JS = r"""(function () {
       applyPreset(PRESETS[target.dataset.preset]);
     } else if (target.dataset.copy) {
       handleCopy(target);
-    } else if (target.dataset.expand) {
-      byId(target.dataset.expand).classList.toggle("is-open");
-      syncExpandButtons();
+    } else if (target.dataset.jump) {
+      // A jump of the table of contents. Not a #link: the hash holds #cfg.
+      byId(target.dataset.jump).scrollIntoView({ block: "start" });
     }
   });
   byId("optionSearch").addEventListener("input", applySearch);
@@ -9672,18 +9652,13 @@ _SCENARIO_PAGE_JS = r"""(function () {
   byId("urlErrorJump").addEventListener("click", () => {
     if (state.errorPath) revealOption(state.errorPath);
   });
-  // These boxes are <details>: the browser opens them by mouse and by
-  // keyboard. The copy texts inside get a height only then.
-  ["moreBox", "compatBox", "loadBox"].forEach((id) => { byId(id).addEventListener("toggle", syncExpandButtons); });
-  window.addEventListener("resize", syncExpandButtons);
   byId("loadTokenButton").addEventListener("click", () => loadToken(byId("loadToken").value, true));
   byId("loadToken").addEventListener("keydown", (event) => {
-    // Enter loads a one-line address or code. A JSON keeps its line breaks.
-    if (event.key === "Enter" && !event.shiftKey && byId("loadToken").value.trim()[0] !== "{") {
-      event.preventDefault();
-      loadToken(byId("loadToken").value, true);
-    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    loadToken(byId("loadToken").value, true);
   });
+  // A pasted address is read at once: no button to press.
   byId("loadToken").addEventListener("paste", () => {
     setTimeout(() => { if (byId("loadToken").value.trim()) loadToken(byId("loadToken").value, true); }, 0);
   });
@@ -9737,8 +9712,8 @@ CONFIG_OPTION_SECTIONS: tuple[dict[str, str], ...] = (
     },
 )
 
-# ``open``: an error group starts expanded once "에러 넣기" is opened. Build
-# groups are cards inside "자세한 설정" and have no fold of their own.
+# ``open``: kept for readers of /scenario/meta. The screen shows every group
+# expanded (nothing folds), so it no longer reads this.
 CONFIG_OPTION_GROUPS: tuple[dict[str, Any], ...] = (
     {"id": "basic", "section": "build", "open": True, "label": "기본 정보", "description": "서버와 서비스의 이름"},
     {
@@ -9818,7 +9793,7 @@ AUTH_MODE_DESCRIPTIONS = {
         "연결, 툴 목록, 다른 툴 호출은 토큰 없이 됩니다"
     ),
 }
-# "자세히" lines of an option (``help`` in /scenario/meta). Each line says what
+# Help lines of an option (``help`` in /scenario/meta), shown under its control. Each line says what
 # the server does; keep them in step with the code they describe.
 # serverEra: request_era(), handle_mcp_exchange(), do_GET / do_DELETE.
 SERVER_ERA_HELP = (
@@ -9988,7 +9963,7 @@ def config_option_schema() -> list[dict[str, Any]]:
     ``detail`` marks a rarely used option (the screen no longer folds these
     apart; every build option that is not ``basic`` is under "자세한 설정").
     ``basic`` marks the options the screen always shows at the top ("기본 설정").
-    ``help`` is a list of lines the screen shows under "자세히": what exactly
+    ``help`` is a list of lines the screen shows under the control: what exactly
     the server checks or answers. ``description`` stays the one-line summary.
     """
     delay_max = MAX_INJECTED_DELAY_SECONDS
